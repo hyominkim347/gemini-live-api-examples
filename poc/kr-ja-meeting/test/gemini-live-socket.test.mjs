@@ -57,6 +57,9 @@ test("Gemini socket traces setup, PCM audio, translated output, and resumption",
     onTurnComplete() {
       lifecycle.push("turn");
     },
+    onGenerationComplete() {
+      lifecycle.push("generation");
+    },
     onResumptionHandle() {
       lifecycle.push("handle");
     },
@@ -103,18 +106,20 @@ test("Gemini socket traces setup, PCM audio, translated output, and resumption",
       sessionResumptionUpdate: { resumable: true, newHandle: "next-handle" },
       serverContent: {
         modelTurn: { parts: [{ inlineData: { data: "translated-pcm" } }] },
+        generationComplete: true,
         turnComplete: true,
       },
     }),
   );
   assert.equal(handles.get("meeting-1", "ko"), "next-handle");
   assert.deepEqual(audio, ["translated-pcm"]);
-  assert.deepEqual(lifecycle, ["setup", "handle", "turn"]);
+  assert.deepEqual(lifecycle, ["setup", "handle", "generation", "turn"]);
   assert.deepEqual(serverEvents, [
     { setupComplete: true },
     {
       resumptionUpdate: true,
       modelAudio: true,
+      generationComplete: true,
       turnComplete: true,
     },
   ]);

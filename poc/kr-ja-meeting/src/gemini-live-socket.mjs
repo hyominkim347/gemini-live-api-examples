@@ -13,6 +13,7 @@ export class GeminiLiveTranslateSocket {
   #openState;
   #onTranslatedAudio;
   #onSetupComplete;
+  #onGenerationComplete;
   #onTurnComplete;
   #onResumptionHandle;
   #onError;
@@ -31,6 +32,7 @@ export class GeminiLiveTranslateSocket {
     openState = 1,
     onTranslatedAudio,
     onSetupComplete,
+    onGenerationComplete,
     onTurnComplete,
     onResumptionHandle,
     onError,
@@ -49,6 +51,7 @@ export class GeminiLiveTranslateSocket {
     this.#openState = openState;
     this.#onTranslatedAudio = onTranslatedAudio ?? (() => {});
     this.#onSetupComplete = onSetupComplete ?? (() => {});
+    this.#onGenerationComplete = onGenerationComplete ?? (() => {});
     this.#onTurnComplete = onTurnComplete ?? (() => {});
     this.#onResumptionHandle = onResumptionHandle ?? (() => {});
     this.#onError = onError ?? (() => {});
@@ -183,6 +186,9 @@ export class GeminiLiveTranslateSocket {
       if (part.inlineData?.data) {
         this.#onTranslatedAudio(part.inlineData.data);
       }
+    }
+    if (message.serverContent?.generationComplete) {
+      this.#onGenerationComplete();
     }
     if (message.serverContent?.turnComplete) {
       this.#onTurnComplete();
