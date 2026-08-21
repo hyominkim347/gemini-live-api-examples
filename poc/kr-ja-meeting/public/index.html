@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>한일 통역 회의 — 4명 tracer</title>
+    <link rel="stylesheet" href="/public/style.css">
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">LOCAL TRACER · 2 KO + 2 JA</p>
+          <h1>말하는 사람은 한 명,<br>듣는 트랙도 한 개</h1>
+          <p class="lede">번역과 원음이 겹치지 않는 4명 회의 라우팅을 실제 상태 모델로 재현합니다.</p>
+        </div>
+        <div class="privacy-card">
+          <strong>PoC 데이터 경계</strong>
+          <span>Session resumption ON</span>
+          <span>handle은 이 탭의 메모리에만 보관</span>
+          <span>전사·File API·cache·Grounding OFF</span>
+        </div>
+      </header>
+
+      <section class="status-strip" aria-live="polite">
+        <div><span>활성 화자</span><strong id="active-speaker">없음</strong></div>
+        <div><span>번역 방향</span><strong id="translation-direction">대기</strong></div>
+        <div><span>Resumption handle</span><strong id="handle-status">메모리 0개</strong></div>
+        <div><span>오디오 겹침</span><strong id="overlap-status" class="safe">없음</strong></div>
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">ROOM</p>
+            <h2>참가자 4명</h2>
+          </div>
+          <div class="global-controls">
+            <button id="phrase-boundary" disabled>다음 발화 경계</button>
+            <button id="stop-speaking" disabled>발화 종료</button>
+            <button id="close-meeting" class="secondary">회의 종료</button>
+          </div>
+        </div>
+        <div id="participants" class="participant-grid"></div>
+      </section>
+
+      <section class="architecture">
+        <p class="eyebrow">REAL ADAPTER SEAMS</p>
+        <h2>실서비스 연결 경로</h2>
+        <div class="flow">
+          <div>화자 PCM<br><small>LiveKit original track</small></div>
+          <span>→</span>
+          <div>Gemini Live Translate<br><small>translationConfig + resumption</small></div>
+          <span>→</span>
+          <div>언어별 번역 PCM<br><small>LiveKit translation track</small></div>
+          <span>→</span>
+          <div>청취자 1-track 구독<br><small>setSubscribed()</small></div>
+        </div>
+        <p class="boundary">이 로컬 화면은 외부 key·secret 없이 라우팅 경로를 재현합니다. 실제 provider 음질·지연 확인은 별도 자격 증명 승인 후 수행합니다.</p>
+      </section>
+
+      <section>
+        <p class="eyebrow">EVENTS</p>
+        <h2>회의 이벤트</h2>
+        <ol id="event-log" class="event-log"></ol>
+      </section>
+    </main>
+    <script type="module" src="/public/app.js"></script>
+  </body>
+</html>

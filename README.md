@@ -58,6 +58,8 @@ Live API:
 
 ## Examples
 
+*   **[Korean ↔ Japanese 4-person meeting tracer](./poc/kr-ja-meeting/README.md)**: A local, credential-free tracer for single-speaker routing, translated-only listening, original-audio checks, phrase-boundary return, LiveKit subscription planning, and memory-only Gemini session resumption handles.
+
 *   **[Gen AI SDK Python example](./gemini-live-genai-python-sdk/README.md)**: Recommended for ease of use. Connect to the Gemini Live API using the Gen AI SDK to build a real-time multimodal application with a Python backend.
 *   **[Epheremal tokens and raw WebSocket example](./gemini-live-ephemeral-tokens-websocket/README.md)**: RAW protocol control. Connect to the Gemini Live API using WebSockets to build a real-time multimodal application with a JavaScript frontend and a Python backend.
 *   **[Command-line Python example](./command-line/python/README.md)**: A minimal command-line app that streams microphone audio to the Gemini Live API and plays back the response in real time using Python.

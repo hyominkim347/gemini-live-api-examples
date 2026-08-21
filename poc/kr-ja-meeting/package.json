@@ -1,0 +1,17 @@
+{
+  "name": "kr-ja-meeting-tracer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "canary:provider": "node scripts/provider-canary.mjs",
+    "dev": "node src/server.mjs",
+    "test": "node --test",
+    "check": "node --test && node scripts/check-source.mjs"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "^0.13.34",
+    "livekit-server-sdk": "^2.18.0",
+    "ws": "^8.21.3"
+  }
+}
