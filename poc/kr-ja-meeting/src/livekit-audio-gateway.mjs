@@ -14,6 +14,7 @@ export class LiveKitAudioGateway {
   #room;
   #translationSinks = new Map();
   #localTracks = [];
+  #closed = false;
 
   constructor(room) {
     if (!room) throw new Error("connected translator room is required");
@@ -25,6 +26,7 @@ export class LiveKitAudioGateway {
   }
 
   async translationSink(targetLanguage) {
+    if (this.#closed) throw new Error("LiveKit audio gateway is closed");
     if (!new Set(["ko", "ja"]).has(targetLanguage)) {
       throw new Error(`unsupported target language: ${targetLanguage}`);
     }
@@ -35,14 +37,39 @@ export class LiveKitAudioGateway {
     const track = LocalAudioTrack.createAudioTrack(`translation:${targetLanguage}`, source);
     const options = new TrackPublishOptions();
     options.source = TrackSource.SOURCE_MICROPHONE;
-    await this.#room.localParticipant.publishTrack(track, options);
+    try {
+      await this.#room.localParticipant.publishTrack(track, options);
+    } catch (error) {
+      await track.close(true);
+      throw error;
+    }
+    if (this.#closed) {
+      await track.close(true);
+      throw new Error("LiveKit audio gateway closed while publishing translation track");
+    }
     this.#localTracks.push(track);
     const sink = {
       async capture(pcm) {
         const bytes = Buffer.isBuffer(pcm) ? pcm : Buffer.from(pcm);
         const copy = Uint8Array.from(bytes);
         const samples = new Int16Array(copy.buffer);
+        const queuedBeforeMs = source.queuedDuration;
+        const startedAt = performance.now();
         await source.captureFrame(new AudioFrame(samples, 24_000, 1, samples.length));
+        return {
+          queuedBeforeMs,
+          queuedAfterMs: source.queuedDuration,
+          captureWaitMs: performance.now() - startedAt,
+        };
+      },
+      queuedDurationMs() {
+        return source.queuedDuration;
+      },
+      waitForPlayout() {
+        return source.waitForPlayout();
+      },
+      clearQueue() {
+        source.clearQueue();
       },
     };
     this.#translationSinks.set(targetLanguage, sink);
@@ -84,13 +111,14 @@ export class LiveKitAudioGateway {
   }
 
   async close() {
+    this.#closed = true;
     await Promise.allSettled(this.#localTracks.map((track) => track.close(true)));
     this.#localTracks = [];
     this.#translationSinks.clear();
   }
 }
 
-function waitForPublication(room, trackName, timeoutMs = 20_000) {
+export function waitForPublication(room, trackName, timeoutMs = 20_000) {
   for (const participant of room.remoteParticipants.values()) {
     for (const publication of participant.trackPublications.values()) {
       if (publicationName(publication) === trackName) return Promise.resolve(publication);
@@ -112,9 +140,13 @@ function waitForPublication(room, trackName, timeoutMs = 20_000) {
   });
 }
 
-function subscribe(room, publication) {
+export function subscribe(room, publication, timeoutMs = 20_000) {
   if (publication.subscribed && publication.track) return Promise.resolve(publication.track);
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`LiveKit subscription timed out: ${publication.sid}`));
+    }, timeoutMs);
     const subscribed = (track, candidate) => {
       if (candidate !== publication) return;
       cleanup();
@@ -126,6 +158,7 @@ function subscribe(room, publication) {
       reject(new Error(`LiveKit subscription failed: ${reason ?? trackSid}`));
     };
     const cleanup = () => {
+      clearTimeout(timeout);
       room.off(RoomEvent.TrackSubscribed, subscribed);
       room.off(RoomEvent.TrackSubscriptionFailed, failed);
     };

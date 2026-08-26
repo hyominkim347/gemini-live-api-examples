@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "canary:browser-playout": "node scripts/browser-playout-canary.mjs",
+    "canary:provider-browser": "node scripts/provider-browser-playout-canary.mjs",
     "canary:provider": "node scripts/provider-canary.mjs",
+    "canary:playout-continuity": "node scripts/playout-continuity-canary.mjs",
     "dev": "node src/server.mjs",
     "test": "node --test",
     "check": "node --test && node scripts/check-source.mjs"
@@ -14,5 +17,8 @@
     "livekit-client": "^2.22.0",
     "livekit-server-sdk": "^2.18.0",
     "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
   }
 }
