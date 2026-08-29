@@ -50,6 +50,10 @@ export class MemoryResumptionHandleStore {
     this.#handles.set(this.#key(meetingId, targetLanguage), handle);
   }
 
+  delete(meetingId, targetLanguage) {
+    this.#handles.delete(this.#key(meetingId, targetLanguage));
+  }
+
   clearMeeting(meetingId) {
     for (const key of this.#handles.keys()) {
       if (key.startsWith(`${meetingId}:`)) {

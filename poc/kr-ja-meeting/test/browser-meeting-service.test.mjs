@@ -2,6 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { BrowserMeetingService } from "../src/browser-meeting-service.mjs";
+import { GeminiLiveTranslateSocket } from "../src/gemini-live-socket.mjs";
+import { MemoryResumptionHandleStore } from "../src/gemini-session.mjs";
+import { LiveTranslationBridge } from "../src/live-translation-bridge.mjs";
+
+class FakeSocket {
+  static OPEN = 1;
+  handlers = new Map();
+  readyState = FakeSocket.OPEN;
+  sent = [];
+
+  on(event, handler) { this.handlers.set(event, handler); }
+  emit(event, ...args) { this.handlers.get(event)?.(...args); }
+  send(data) { this.sent.push(JSON.parse(data)); }
+  close() { this.readyState = 3; }
+}
+
+async function waitFor(check) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (check()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("condition was not reached");
+}
 
 function createService(overrides = {}) {
   const bridgeEvents = [];
@@ -162,4 +185,115 @@ test("invalid join and speech activity fail closed", async () => {
     service.speechActivity({ participantId: participant.id, type: "invented", observedAt: 1 }),
     /unsupported speech activity/,
   );
+});
+
+test("automatic speech keeps its utterance id while an expired Gemini session retries", async () => {
+  const sockets = [];
+  const retryEvents = [];
+  const handles = new MemoryResumptionHandleStore();
+  handles.set("browser-poc", "ko", "expired-handle");
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    audioGateway: {
+      async translationSink() { return { async capture() {} }; },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(callbacks) {
+      return new GeminiLiveTranslateSocket({
+        ...callbacks,
+        apiKey: "test-only-key",
+        handleStore: handles,
+        socketFactory(url) {
+          const socket = new FakeSocket(url);
+          sockets.push(socket);
+          return socket;
+        },
+        openState: FakeSocket.OPEN,
+        automaticActivityDetection: false,
+        onServerEvent(event) { retryEvents.push(event); },
+      });
+    },
+  });
+  const { service } = createService({ translationBridge: bridge });
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+  await service.mic(participant.id, true);
+
+  const speechStart = service.speechActivity({
+    participantId: participant.id,
+    type: "speech-start",
+    observedAt: 100,
+  });
+  await waitFor(() => sockets.length === 1);
+  sockets[0].emit("open");
+  sockets[0].emit("close", 1008, "BidiGenerateContent session not found");
+
+  assert.equal(sockets.length, 2);
+  assert.equal(service.snapshot().activeUtteranceId, "utterance-1");
+  sockets[1].emit("open");
+  sockets[1].emit("message", JSON.stringify({ setupComplete: {} }));
+  const state = await speechStart;
+
+  assert.equal(state.activeUtteranceId, "utterance-1");
+  assert.deepEqual(retryEvents.filter(({ type }) => type === "resumption-retry").map(({ outcome }) => outcome), [
+    "started",
+    "succeeded",
+  ]);
+  await service.speechActivity({
+    participantId: participant.id,
+    type: "speech-end",
+    observedAt: 200,
+  });
+});
+
+test("a second setup failure stops retrying and cleans the automatic speech state", async () => {
+  const sockets = [];
+  const retryEvents = [];
+  const handles = new MemoryResumptionHandleStore();
+  handles.set("browser-poc", "ko", "expired-handle");
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    audioGateway: {
+      async translationSink() { return { async capture() {} }; },
+      async subscribeOriginal() { throw new Error("must not subscribe before setup"); },
+    },
+    geminiFactory(callbacks) {
+      return new GeminiLiveTranslateSocket({
+        ...callbacks,
+        apiKey: "test-only-key",
+        handleStore: handles,
+        socketFactory(url) {
+          const socket = new FakeSocket(url);
+          sockets.push(socket);
+          return socket;
+        },
+        openState: FakeSocket.OPEN,
+        automaticActivityDetection: false,
+        onServerEvent(event) { retryEvents.push(event); },
+      });
+    },
+  });
+  const { service } = createService({ translationBridge: bridge });
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+  await service.mic(participant.id, true);
+
+  const speechStart = service.speechActivity({
+    participantId: participant.id,
+    type: "speech-start",
+    observedAt: 100,
+  });
+  await waitFor(() => sockets.length === 1);
+  sockets[0].emit("open");
+  sockets[0].emit("close", 1008, "BidiGenerateContent session not found");
+  sockets[1].emit("open");
+  sockets[1].emit("close", 1008, "BidiGenerateContent session not found");
+
+  await assert.rejects(speechStart, /Gemini closed during setup/);
+  assert.equal(sockets.length, 2);
+  assert.equal(service.snapshot().activeSpeakerId, null);
+  assert.equal(service.snapshot().activeUtteranceId, null);
+  assert.equal(service.snapshot().participants[0].speech, "silent");
+  assert.deepEqual(retryEvents.filter(({ type }) => type === "resumption-retry").map(({ outcome }) => outcome), [
+    "started",
+    "failed",
+  ]);
 });
