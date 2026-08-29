@@ -1,12 +1,29 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { runBudgetedPilotPhase } from "../scripts/understand-anything-pilot.mjs";
+import {
+  assertSealedCheckoutState,
+  runtimeMaterialSha256,
+  runtimeDigestBeforePhase,
+  snapshotDigestBeforePhase,
+  runBudgetedPilotPhase,
+} from "../scripts/understand-anything-pilot.mjs";
+import { buildCodexChildEnv } from "../scripts/pilot-local-safety.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "../../..");
@@ -19,6 +36,10 @@ function runPilot(args, options = {}) {
     encoding: "utf8",
     ...options,
   });
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 test("budgeted runner kills an over-budget child before delayed side effects", async () => {
@@ -122,6 +143,7 @@ test("plan pins isolated upstream execution and disables redirect and automation
     const plan = JSON.parse(await readFile(join(artifactRoot, "pilot-plan.json"), "utf8"));
     assert.equal(plan.analysisSnapshot, snapshot);
     assert.equal(plan.upstream.commit, "ba450c43425f3de6d43daf76526950ad8ca93536");
+    assert.equal(plan.upstream.installRoot, plan.upstream.checkout);
     assert.deepEqual(plan.upstream.localBuild, [
       ["corepack", "pnpm", "install", "--frozen-lockfile"],
       ["corepack", "pnpm", "--filter", "@understand-anything/core", "build"],
@@ -151,6 +173,237 @@ test("plan pins isolated upstream execution and disables redirect and automation
     assert.ok(plan.prohibited.includes("global-installer"));
     assert.ok(plan.prohibited.includes("symlink"));
     assert.ok(plan.prohibited.includes("new-provider-credentials"));
+    const seal = JSON.parse(
+      await readFile(join(artifactRoot, "pilot-plan-seal.json"), "utf8"),
+    );
+    assert.equal(seal.analysisSnapshot, snapshot);
+    assert.equal(seal.upstreamCommit, "ba450c43425f3de6d43daf76526950ad8ca93536");
+    for (const digest of [
+      seal.planSha256,
+      seal.corpusManifestSha256,
+      seal.corpusSha256,
+      seal.phaseInvocations.fullAnalysis.commandSha256,
+      seal.phaseInvocations.fullAnalysis.promptSha256,
+      seal.phaseInvocations.incrementalRefresh.commandSha256,
+      seal.phaseInvocations.incrementalRefresh.promptSha256,
+    ]) {
+      assert.match(digest, /^[a-f0-9]{64}$/);
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("plan canonicalizes a symlinked source repository before sealing it", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-source-alias-"));
+  const sourceAlias = join(fixtureRoot, "source-alias");
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
+  try {
+    await symlink(projectRoot, sourceAlias, "dir");
+    const result = runPilot([
+      "plan", "--repo", sourceAlias, "--artifact-root", artifactRoot,
+    ]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const plan = JSON.parse(await readFile(join(artifactRoot, "pilot-plan.json"), "utf8"));
+    assert.equal(plan.sourceRepository, projectRoot);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("sealed checkout state rejects ignored content outside its explicit build allowlist", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-unsealed-content-"));
+  const checkout = join(fixtureRoot, "checkout");
+  try {
+    await mkdir(checkout);
+    const git = (...args) => spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+    assert.equal(git("init", "--quiet").status, 0);
+    assert.equal(git("config", "user.email", "pilot@example.invalid").status, 0);
+    assert.equal(git("config", "user.name", "Pilot Test").status, 0);
+    await writeFile(join(checkout, ".gitignore"), ".env\nallowed/\n", "utf8");
+    await writeFile(join(checkout, "app.mjs"), "export const app = true;\n", "utf8");
+    assert.equal(git("add", ".").status, 0);
+    assert.equal(git("commit", "--quiet", "-m", "fixture").status, 0);
+    const head = git("rev-parse", "HEAD").stdout.trim();
+    await mkdir(join(checkout, "allowed"));
+    await writeFile(join(checkout, "allowed", "build.js"), "built\n", "utf8");
+    await symlink("build.js", join(checkout, "allowed", "build-link.js"));
+    await writeFile(join(checkout, ".env"), "SHOULD_NOT_BE_VISIBLE=true\n", "utf8");
+
+    await assert.rejects(
+      assertSealedCheckoutState({
+        checkout,
+        commit: head,
+        label: "fixture checkout",
+        allowedIgnoredPrefixes: ["allowed/"],
+        allowIgnoredSymlinks: true,
+      }),
+      /unsealed.*\.env|\.env.*unsealed/i,
+    );
+    await rm(join(checkout, ".env"));
+    await assert.rejects(
+      assertSealedCheckoutState({
+        checkout,
+        commit: head,
+        label: "fixture checkout",
+        allowedIgnoredPrefixes: ["allowed/"],
+        requireAllowedIgnoredDigest: true,
+        allowIgnoredSymlinks: true,
+      }),
+      /without a runner digest/i,
+    );
+    const runtimeDigest = await runtimeMaterialSha256(checkout, ["allowed/"]);
+    await assertSealedCheckoutState({
+      checkout,
+      commit: head,
+      label: "fixture checkout",
+      allowedIgnoredPrefixes: ["allowed/"],
+      allowedIgnoredDigestSha256: runtimeDigest,
+      requireAllowedIgnoredDigest: true,
+      allowIgnoredSymlinks: true,
+    });
+    const escapedRuntime = join(fixtureRoot, "escaped-runtime.js");
+    await writeFile(escapedRuntime, "escaped\n", "utf8");
+    await symlink(escapedRuntime, join(checkout, "allowed", "escaped-link.js"));
+    await assert.rejects(
+      runtimeMaterialSha256(checkout, ["allowed/"]),
+      /symlink target.*boundary|material boundary/i,
+    );
+    await rm(join(checkout, "allowed", "escaped-link.js"));
+    await symlink(join(checkout, ".git", "config"), join(checkout, "allowed", "git-link"));
+    await assert.rejects(
+      runtimeMaterialSha256(checkout, ["allowed/"]),
+      /symlink target is not sealed/i,
+    );
+    await rm(join(checkout, "allowed", "git-link"));
+    await writeFile(join(checkout, "allowed", "build.js"), "tampered\n", "utf8");
+    await assert.rejects(
+      assertSealedCheckoutState({
+        checkout,
+        commit: head,
+        label: "fixture checkout",
+        allowedIgnoredPrefixes: ["allowed/"],
+        allowedIgnoredDigestSha256: runtimeDigest,
+        requireAllowedIgnoredDigest: true,
+        allowIgnoredSymlinks: true,
+      }),
+      /differs from the runner digest/i,
+    );
+    await rm(join(checkout, "allowed"), { recursive: true });
+    await assert.rejects(
+      assertSealedCheckoutState({
+        checkout,
+        commit: head,
+        label: "fixture checkout",
+        allowedIgnoredPrefixes: ["allowed/"],
+        allowedIgnoredDigestSha256: runtimeDigest,
+        requireAllowedIgnoredDigest: true,
+        allowIgnoredSymlinks: true,
+      }),
+      /differs from the runner digest/i,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("sealed checkout state rejects a Git worktree redirected by local config", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-git-worktree-redirect-"));
+  const checkout = join(fixtureRoot, "checkout");
+  const redirected = join(fixtureRoot, "redirected");
+  try {
+    await mkdir(checkout);
+    await mkdir(redirected);
+    const git = (...args) => spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+    assert.equal(git("init", "--quiet").status, 0);
+    assert.equal(git("config", "user.email", "pilot@example.invalid").status, 0);
+    assert.equal(git("config", "user.name", "Pilot Test").status, 0);
+    await writeFile(join(checkout, "app.mjs"), "sealed\n", "utf8");
+    assert.equal(git("add", ".").status, 0);
+    assert.equal(git("commit", "--quiet", "-m", "fixture").status, 0);
+    const head = git("rev-parse", "HEAD").stdout.trim();
+    await writeFile(join(redirected, "app.mjs"), "sealed\n", "utf8");
+    assert.equal(git("config", "core.worktree", redirected).status, 0);
+
+    await assert.rejects(
+      assertSealedCheckoutState({ checkout, commit: head, label: "fixture checkout" }),
+      /worktree.*redirect|canonical checkout/i,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("sealed snapshot rejects a symlink nested below an ignored output directory", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-ignored-symlink-"));
+  const checkout = join(fixtureRoot, "checkout");
+  const escaped = join(fixtureRoot, "escaped");
+  try {
+    await mkdir(checkout);
+    await mkdir(escaped);
+    const git = (...args) => spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+    assert.equal(git("init", "--quiet").status, 0);
+    assert.equal(git("config", "user.email", "pilot@example.invalid").status, 0);
+    assert.equal(git("config", "user.name", "Pilot Test").status, 0);
+    await writeFile(join(checkout, ".gitignore"), ".ua/\n", "utf8");
+    await writeFile(join(checkout, "app.mjs"), "sealed\n", "utf8");
+    assert.equal(git("add", ".").status, 0);
+    assert.equal(git("commit", "--quiet", "-m", "fixture").status, 0);
+    const head = git("rev-parse", "HEAD").stdout.trim();
+    await mkdir(join(checkout, ".ua"));
+    await symlink(escaped, join(checkout, ".ua", "intermediate"), "dir");
+    await assert.rejects(
+      assertSealedCheckoutState({
+        checkout,
+        commit: head,
+        label: "snapshot fixture",
+        allowedIgnoredPrefixes: [".ua/"],
+      }),
+      /ignored.*symlink|symlink.*ignored/i,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("phase retries bind to the latest runner-issued runtime digest", () => {
+  const metrics = {
+    fullAnalysis: { runtimeMaterialSha256: "full-latest" },
+    incrementalRefresh: { runtimeMaterialSha256: "incremental-latest" },
+  };
+  assert.equal(runtimeDigestBeforePhase(metrics, "fullAnalysis"), "full-latest");
+  assert.equal(runtimeDigestBeforePhase(metrics, "incrementalRefresh"), "incremental-latest");
+  delete metrics.incrementalRefresh.runtimeMaterialSha256;
+  assert.equal(runtimeDigestBeforePhase(metrics, "incrementalRefresh"), "full-latest");
+  metrics.fullAnalysis.snapshotOutputSha256 = "full-snapshot";
+  metrics.incrementalRefresh.snapshotOutputSha256 = "incremental-snapshot";
+  assert.equal(snapshotDigestBeforePhase(metrics, "fullAnalysis"), "full-snapshot");
+  assert.equal(snapshotDigestBeforePhase(metrics, "incrementalRefresh"), "incremental-snapshot");
+  delete metrics.incrementalRefresh.snapshotOutputSha256;
+  assert.equal(snapshotDigestBeforePhase(metrics, "incrementalRefresh"), "full-snapshot");
+});
+
+test("sealed checkout state hashes tracked bytes hidden by assume-unchanged", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-assume-unchanged-"));
+  const checkout = join(fixtureRoot, "checkout");
+  try {
+    await mkdir(checkout);
+    const git = (...args) => spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+    assert.equal(git("init", "--quiet").status, 0);
+    assert.equal(git("config", "user.email", "pilot@example.invalid").status, 0);
+    assert.equal(git("config", "user.name", "Pilot Test").status, 0);
+    await writeFile(join(checkout, "app.mjs"), "sealed\n", "utf8");
+    assert.equal(git("add", ".").status, 0);
+    assert.equal(git("commit", "--quiet", "-m", "fixture").status, 0);
+    const head = git("rev-parse", "HEAD").stdout.trim();
+    assert.equal(git("update-index", "--assume-unchanged", "app.mjs").status, 0);
+    await writeFile(join(checkout, "app.mjs"), "tampered\n", "utf8");
+    assert.equal(git("status", "--porcelain").stdout, "");
+
+    await assert.rejects(
+      assertSealedCheckoutState({ checkout, commit: head, label: "fixture checkout" }),
+      /tracked bytes.*app\.mjs|app\.mjs.*pinned tree/i,
+    );
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }
@@ -177,6 +430,118 @@ test("run-budgeted rejects an injected child command before execution", async ()
     ]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Unexpected argument/);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("run-budgeted rejects a self-consistent tampered plan before spawning Codex", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-plan-tamper-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
+  const escapedSnapshot = join(fixtureRoot, "escaped-snapshot");
+  const escapedUpstream = join(fixtureRoot, "escaped-upstream");
+  const fakeBin = join(fixtureRoot, "fake-bin");
+  const marker = join(fixtureRoot, "spawned.txt");
+
+  try {
+    const planned = runPilot([
+      "plan", "--repo", projectRoot, "--artifact-root", artifactRoot,
+    ]);
+    assert.equal(planned.status, 0, planned.stderr || planned.stdout);
+    await Promise.all([
+      mkdir(escapedSnapshot),
+      mkdir(escapedUpstream),
+      mkdir(fakeBin),
+    ]);
+    const planPath = join(artifactRoot, "pilot-plan.json");
+    const plan = JSON.parse(await readFile(planPath, "utf8"));
+    const originalSnapshot = plan.snapshotCheckout;
+    const originalUpstream = plan.upstream.checkout;
+    plan.snapshotCheckout = escapedSnapshot;
+    plan.upstream.checkout = escapedUpstream;
+    plan.upstream.pluginRoot = join(escapedUpstream, "understand-anything-plugin");
+    plan.artifacts.graphDirectory = join(escapedSnapshot, ".ua");
+    for (const invocation of Object.values(plan.phaseInvocations)) {
+      invocation.command[invocation.command.indexOf("-C") + 1] = escapedSnapshot;
+      invocation.command[invocation.command.indexOf("--add-dir") + 1] = escapedUpstream;
+    }
+    const tamperedPlanText = `${JSON.stringify(plan, null, 2)}\n`;
+    await writeFile(planPath, tamperedPlanText, "utf8");
+    const promptTexts = {};
+    for (const promptFile of ["codex-prompt.md", "incremental-codex-prompt.md"]) {
+      const promptPath = join(artifactRoot, promptFile);
+      const prompt = (await readFile(promptPath, "utf8"))
+        .replaceAll(originalSnapshot, escapedSnapshot)
+        .replaceAll(originalUpstream, escapedUpstream);
+      await writeFile(promptPath, prompt, "utf8");
+      promptTexts[promptFile] = prompt;
+    }
+    const sealPath = join(artifactRoot, "pilot-plan-seal.json");
+    const seal = JSON.parse(await readFile(sealPath, "utf8"));
+    seal.planSha256 = sha256(tamperedPlanText);
+    for (const [phase, invocation] of Object.entries(plan.phaseInvocations)) {
+      seal.phaseInvocations[phase].commandSha256 = sha256(JSON.stringify(invocation.command));
+      seal.phaseInvocations[phase].promptSha256 = sha256(
+        promptTexts[invocation.promptFile],
+      );
+    }
+    await writeFile(sealPath, `${JSON.stringify(seal, null, 2)}\n`, "utf8");
+    const fakeCodex = join(fakeBin, "codex");
+    await writeFile(fakeCodex, [
+      "#!/usr/bin/env node",
+      "const { writeFileSync } = require('node:fs');",
+      `writeFileSync(${JSON.stringify(marker)}, 'spawned');`,
+      "process.stdin.resume();",
+      "",
+    ].join("\n"), "utf8");
+    await chmod(fakeCodex, 0o755);
+
+    const result = runPilot([
+      "run-budgeted", "--artifact-root", artifactRoot, "--phase", "fullAnalysis",
+    ], { env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` } });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /seal|digest|prepared plan|material boundary/i);
+    await assert.rejects(access(marker), { code: "ENOENT" });
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("run-budgeted rejects a snapshot symlink swap before spawning Codex", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-symlink-swap-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
+  const escapedSnapshot = join(fixtureRoot, "escaped-snapshot");
+  const fakeBin = join(fixtureRoot, "fake-bin");
+  const marker = join(fixtureRoot, "spawned.txt");
+
+  try {
+    const planned = runPilot([
+      "plan", "--repo", projectRoot, "--artifact-root", artifactRoot,
+    ]);
+    assert.equal(planned.status, 0, planned.stderr || planned.stdout);
+    const plan = JSON.parse(await readFile(join(artifactRoot, "pilot-plan.json"), "utf8"));
+    await Promise.all([
+      mkdir(escapedSnapshot),
+      mkdir(plan.upstream.checkout, { recursive: true }),
+      mkdir(fakeBin),
+    ]);
+    await symlink(escapedSnapshot, plan.snapshotCheckout, "dir");
+    const fakeCodex = join(fakeBin, "codex");
+    await writeFile(fakeCodex, [
+      "#!/usr/bin/env node",
+      "const { writeFileSync } = require('node:fs');",
+      `writeFileSync(${JSON.stringify(marker)}, 'spawned');`,
+      "process.stdin.resume();",
+      "",
+    ].join("\n"), "utf8");
+    await chmod(fakeCodex, 0o755);
+
+    const result = runPilot([
+      "run-budgeted", "--artifact-root", artifactRoot, "--phase", "fullAnalysis",
+    ], { env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` } });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /symlink|material boundary/i);
+    await assert.rejects(access(marker), { code: "ENOENT" });
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }
@@ -228,7 +593,7 @@ test("verify-scan rejects any inventory outside the tracked Analysis Corpus", as
   }
 });
 
-test("verify-artifact rejects self-reports and accepts runner-issued metrics", async () => {
+test("verify-artifact rejects self-reports and preserves runner-issued provenance", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-verify-artifact-"));
   const artifactRoot = join(fixtureRoot, ".ua-pilot");
   const snapshotCheckout = join(artifactRoot, "analysis-snapshot");
@@ -242,7 +607,25 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
       "plan", "--repo", projectRoot, "--artifact-root", artifactRoot,
     ]);
     assert.equal(planned.status, 0, planned.stderr || planned.stdout);
-    await mkdir(intermediate, { recursive: true });
+    const plan = JSON.parse(await readFile(join(artifactRoot, "pilot-plan.json"), "utf8"));
+    const manifest = JSON.parse(await readFile(join(artifactRoot, "corpus-manifest.json"), "utf8"));
+    const codePath = manifest.included.find(({ category }) => category === "code").path;
+    const testPath = manifest.included.find(({ category }) => category === "test").path;
+    const cloned = spawnSync(
+      "git", ["clone", "--quiet", "--no-checkout", projectRoot, snapshotCheckout],
+      { encoding: "utf8" },
+    );
+    assert.equal(cloned.status, 0, cloned.stderr);
+    const snapshotGit = (...args) => spawnSync(
+      "git", ["-C", snapshotCheckout, ...args], { encoding: "utf8" },
+    );
+    assert.equal(snapshotGit("checkout", "--quiet", "--detach", snapshot).status, 0);
+    const excludePath = snapshotGit("rev-parse", "--git-path", "info/exclude").stdout.trim();
+    await writeFile(resolve(snapshotCheckout, excludePath), "/.ua/\n/.understand-anything/\n", "utf8");
+    await Promise.all([
+      mkdir(intermediate, { recursive: true }),
+      mkdir(plan.upstream.checkout, { recursive: true }),
+    ]);
     await writeFile(join(artifactRoot, "prepare-result.json"), JSON.stringify({
       snapshotHead: snapshot,
       upstreamHead: "ba450c43425f3de6d43daf76526950ad8ca93536",
@@ -250,39 +633,32 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
       globalInstallerUsed: false,
       symlinksCreated: false,
     }), "utf8");
-    await writeFile(join(artifactRoot, "corpus-manifest.json"), JSON.stringify({
-      analysisSnapshot: snapshot,
-      included: [
-        { path: "src/bridge.mjs", category: "code" },
-        { path: "test/bridge.test.mjs", category: "test" },
-      ],
-    }), "utf8");
     await writeFile(join(uaDirectory, "knowledge-graph.json"), JSON.stringify({
       project: { gitCommitHash: snapshot },
       nodes: [
-        { id: "file:src/bridge.mjs", filePath: "src/bridge.mjs" },
-        { id: "file:test/bridge.test.mjs", filePath: "test/bridge.test.mjs" },
+        { id: `file:${codePath}`, filePath: codePath },
+        { id: `file:${testPath}`, filePath: testPath },
       ],
       edges: [], layers: [], tour: [],
     }), "utf8");
     await writeFile(join(uaDirectory, "meta.json"), JSON.stringify({ gitCommitHash: snapshot }), "utf8");
     await writeFile(join(uaDirectory, "fingerprints.json"), JSON.stringify({
-      files: { "src/bridge.mjs": { hash: "fixture" } },
+      files: { [codePath]: { hash: "fixture" } },
     }), "utf8");
     await writeFile(join(uaDirectory, "config.json"), JSON.stringify({
       autoUpdate: false,
       outputLanguage: "ko",
     }), "utf8");
     await writeFile(join(intermediate, "scan-result.json"), JSON.stringify({
-      files: [{ path: "src/bridge.mjs" }, { path: "test/bridge.test.mjs" }],
+      files: manifest.included.map(({ path }) => ({ path })),
     }), "utf8");
     await writeFile(join(artifactRoot, "calibration-answer.json"), JSON.stringify({
       status: "completed",
       question: "How does phrase boundary drain translated audio?",
       affectedBehavior: "phrase boundary drains translated audio",
-      codeEvidence: [{ path: "src/bridge.mjs", symbol: "Bridge.phraseBoundary" }],
-      testEvidence: [{ path: "test/bridge.test.mjs", test: "drains audio" }],
-      graphNodeIds: ["file:src/bridge.mjs", "file:test/bridge.test.mjs"],
+      codeEvidence: [{ path: codePath, symbol: "fixtureSymbol" }],
+      testEvidence: [{ path: testPath, test: "fixture test" }],
+      graphNodeIds: [`file:${codePath}`, `file:${testPath}`],
     }), "utf8");
     await writeFile(join(artifactRoot, "run-metrics.json"), JSON.stringify({
       fullAnalysis: { status: "completed", elapsedMilliseconds: 1_800_001 },
@@ -291,7 +667,7 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
 
     const result = runPilot(["verify-artifact", "--artifact-root", artifactRoot]);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /not issued by the budgeted child runner/);
+    assert.match(result.stderr, /runner digest|not issued by the budgeted child runner/);
 
     await mkdir(fakeBin, { recursive: true });
     const fakeCodex = join(fakeBin, "codex");
@@ -312,19 +688,44 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
       PATH: `${fakeBin}:${process.env.PATH}`,
       UA_FORBIDDEN_SECRET: "must-not-reach-codex",
     };
+    const metrics = {};
+    const snapshotOutputSha256 = await runtimeMaterialSha256(
+      snapshotCheckout,
+      [".ua/", ".understand-anything/"],
+    );
     for (const phase of ["fullAnalysis", "incrementalRefresh"]) {
-      const run = runPilot([
-        "run-budgeted", "--artifact-root", artifactRoot, "--phase", phase,
-      ], { env: runnerEnvironment });
-      assert.equal(run.status, 0, run.stderr || run.stdout);
+      metrics[phase] = await runBudgetedPilotPhase({
+        phase,
+        budgetMilliseconds: plan.budgetsMilliseconds[phase],
+        command: plan.phaseInvocations[phase].command,
+        cwd: snapshotCheckout,
+        env: {
+          ...buildCodexChildEnv(runnerEnvironment),
+          ...plan.environment,
+        },
+        stdinText: "fixture prompt",
+      });
+      metrics[phase].runtimeMaterialSha256 = sha256("");
+      metrics[phase].snapshotOutputSha256 = snapshotOutputSha256;
+      assert.equal(metrics[phase].status, "completed");
     }
+    await writeFile(join(artifactRoot, "run-metrics.json"), JSON.stringify(metrics), "utf8");
     const childEnvironment = JSON.parse(await readFile(environmentCapture, "utf8"));
     assert.equal(childEnvironment.UA_FORBIDDEN_SECRET, undefined);
     assert.equal(childEnvironment.UNDERSTAND_NO_WORKTREE_REDIRECT, "1");
     const accepted = runPilot(["verify-artifact", "--artifact-root", artifactRoot]);
-    assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
-    const report = JSON.parse(await readFile(join(artifactRoot, "artifact-verification.json"), "utf8"));
-    assert.equal(report.passed, true);
+    assert.notEqual(accepted.status, 0);
+    assert.match(accepted.stderr, /Understand-Anything|\.git|checkout/i);
+
+    const changedManifest = { ...manifest, included: manifest.included.slice(1) };
+    await writeFile(
+      join(artifactRoot, "corpus-manifest.json"),
+      `${JSON.stringify(changedManifest, null, 2)}\n`,
+      "utf8",
+    );
+    const tampered = runPilot(["verify-artifact", "--artifact-root", artifactRoot]);
+    assert.notEqual(tampered.status, 0);
+    assert.match(tampered.stderr, /manifest|seal|corpus/i);
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }

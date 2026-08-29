@@ -113,10 +113,12 @@ node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs verify-artifact \
 `753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6`
 로, AIN-7643 raw result bytes의 SHA-256을
 `6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0`로 고정한다.
-grounded raw evidence가 동결된 expected code와 test 항목을 모두 포함할 때만 정답으로
-센다. `unsupported`, `unknown`, unverified, invented evidence는 graph arm에 유리하게
-계산하지 않는다. scorer revision은 `agent-only-gate-v1`이다. 출력에는 해당 revision,
-input/output contract revision, 질문별 일치 및 누락된 동결 code/test evidence를 기록한다.
+정답은 raw answer의 의미가 동결된 `expectedAnswer.summary`와 일치하는지로 판정하고,
+근거 충족 여부와 독립적으로 센다. 근거는 grounded raw evidence가 동결된 expected code와
+test 항목을 모두 포함할 때만 충족된다. `unsupported`, `unknown`, unverified, invented
+evidence는 evidence gate에 유리하게 계산하지 않는다. scorer revision은
+`agent-only-gate-v2`이다. 출력에는 해당 revision, input/output contract revision,
+질문별 의미 일치와 일치·누락된 동결 code/test evidence를 기록한다.
 
 ```bash
 npm run pilot:adjudicate-agent -- \

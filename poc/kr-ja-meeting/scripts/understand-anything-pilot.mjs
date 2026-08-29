@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, readlink, realpath, stat, writeFile } from "node:fs/promises";
+import { basename, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
@@ -24,6 +24,15 @@ export const CALIBRATION_QUESTION =
   "Live Translate가 completion event를 보내지 않을 때 phraseBoundary()는 번역 오디오를 " +
   "유실하지 않고 다음 입력 구간을 어떻게 시작하며, 첫 audible output이 없으면 어떻게 실패하는가?";
 const PHASES = ["fullAnalysis", "incrementalRefresh"];
+const PLAN_SEAL_FILE = "pilot-plan-seal.json";
+const UPSTREAM_RUNTIME_PREFIXES = [
+  "homepage/node_modules/",
+  "node_modules/",
+  "understand-anything-plugin/node_modules/",
+  "understand-anything-plugin/packages/core/dist/",
+  "understand-anything-plugin/packages/core/node_modules/",
+  "understand-anything-plugin/packages/dashboard/node_modules/",
+];
 
 const CODE_EXTENSIONS = new Set([
   ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
@@ -52,6 +61,14 @@ function git(repo, args) {
     throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed`);
   }
   return result.stdout;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function jsonText(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
 }
 
 export async function runBudgetedPilotPhase({
@@ -249,7 +266,7 @@ function parseOptions(args) {
 
 async function manifestCommand(args) {
   const options = parseOptions(args);
-  const repo = options.repo ? resolve(options.repo) : process.cwd();
+  const repo = await realpath(options.repo ? resolve(options.repo) : process.cwd());
   const artifactRoot = await requireApprovedPilotOutput(
     options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
     "Understand-Anything manifest output",
@@ -281,6 +298,7 @@ function buildPilotPlan(repo, artifactRoot) {
       commit: UPSTREAM_COMMIT,
       checkout: upstreamCheckout,
       installScope: "artifact-local",
+      installRoot: upstreamCheckout,
       pluginRoot: resolve(upstreamCheckout, "understand-anything-plugin"),
       localBuild: [
         ["corepack", "pnpm", "install", "--frozen-lockfile"],
@@ -332,6 +350,58 @@ function buildPilotPlan(repo, artifactRoot) {
   return plan;
 }
 
+function corpusSha256(repo, manifest) {
+  const treeRows = git(repo, [
+    "ls-tree", "-r", "-z", "--format=%(objectname)%x09%(path)", ANALYSIS_SNAPSHOT,
+  ]).split("\0").filter(Boolean);
+  const objectByPath = new Map(treeRows.map((row) => {
+    const separator = row.indexOf("\t");
+    if (separator <= 0) throw new Error("Analysis Corpus tree emitted an invalid row");
+    return [row.slice(separator + 1), row.slice(0, separator)];
+  }));
+  const rows = manifest.included.map(({ path, category }) => {
+    const objectId = objectByPath.get(path);
+    if (!objectId) throw new Error(`Analysis Corpus path is absent from snapshot: ${path}`);
+    return `${path}\0${category}\0${objectId}`;
+  }).sort();
+  return sha256(rows.join("\n"));
+}
+
+function buildPlanSeal({ plan, planText, manifest, manifestText }) {
+  return {
+    contractVersion: 1,
+    analysisSnapshot: ANALYSIS_SNAPSHOT,
+    upstreamCommit: UPSTREAM_COMMIT,
+    planSha256: sha256(planText),
+    corpusManifestSha256: sha256(manifestText),
+    corpusSha256: corpusSha256(plan.sourceRepository, manifest),
+    phaseInvocations: Object.fromEntries(PHASES.map((phase) => [phase, {
+      commandSha256: sha256(JSON.stringify(buildCodexCommand(plan))),
+      promptSha256: sha256(buildCodexPrompt(plan, phase)),
+    }])),
+  };
+}
+
+async function writeSealedPlanFiles({ artifactRoot, plan, manifest }) {
+  const planText = jsonText(plan);
+  const manifestText = jsonText(manifest);
+  const prompts = Object.fromEntries(PHASES.map((phase) => [phase, buildCodexPrompt(plan, phase)]));
+  const seal = buildPlanSeal({ plan, planText, manifest, manifestText });
+  const sealText = jsonText(seal);
+  await Promise.all([
+    writeFile(resolve(artifactRoot, "corpus-manifest.json"), manifestText, "utf8"),
+    writeFile(resolve(artifactRoot, "pilot-plan.json"), planText, "utf8"),
+    writeFile(resolve(artifactRoot, "codex-prompt.md"), prompts.fullAnalysis, "utf8"),
+    writeFile(
+      resolve(artifactRoot, "incremental-codex-prompt.md"),
+      prompts.incrementalRefresh,
+      "utf8",
+    ),
+    writeFile(resolve(artifactRoot, PLAN_SEAL_FILE), sealText, "utf8"),
+  ]);
+  return { seal, sealSha256: sha256(sealText) };
+}
+
 function buildCodexCommand(plan) {
   return [
     "codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
@@ -352,7 +422,7 @@ function buildCodexPrompt(plan, phase = "fullAnalysis") {
   return `Execute the pinned Understand-Anything ${analysisMode} for the local AIN-7639 pilot.\n\n` +
     `1. Read the complete upstream skill at ${skillPath}.\n` +
     `   If core dist is absent, run the plan's localBuild commands only in ` +
-    `${plan.upstream.pluginRoot}; do not install globally.\n` +
+    `${plan.upstream.installRoot}; do not install globally.\n` +
     `2. Analyze only ${plan.snapshotCheckout}, whose HEAD must equal ${plan.analysisSnapshot}.\n` +
     `3. Use the pre-approved .ua/.understandignore without prompting. Keep ` +
     `UNDERSTAND_NO_WORKTREE_REDIRECT=1.\n` +
@@ -364,23 +434,319 @@ function buildCodexPrompt(plan, phase = "fullAnalysis") {
 
 async function planCommand(args) {
   const options = parseOptions(args);
-  const repo = options.repo ? resolve(options.repo) : process.cwd();
+  const repo = await realpath(options.repo ? resolve(options.repo) : process.cwd());
   const artifactRoot = await requireApprovedPilotOutput(
     options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
     "Understand-Anything plan output",
   );
+  const manifest = buildCorpusManifest(repo);
   const plan = buildPilotPlan(repo, artifactRoot);
   await mkdir(artifactRoot, { recursive: true });
-  await Promise.all([
-    writeFile(resolve(artifactRoot, "pilot-plan.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8"),
-    writeFile(resolve(artifactRoot, "codex-prompt.md"), buildCodexPrompt(plan), "utf8"),
-    writeFile(
-      resolve(artifactRoot, "incremental-codex-prompt.md"),
-      buildCodexPrompt(plan, "incrementalRefresh"),
-      "utf8",
-    ),
-  ]);
+  await writeSealedPlanFiles({ artifactRoot, plan, manifest });
   process.stdout.write(`${JSON.stringify({ command: "plan", artifactRoot })}\n`);
+}
+
+function requireDescendant(root, child, label) {
+  const childRelative = relative(root, child);
+  if (!childRelative || childRelative === ".." || childRelative.startsWith(`..${sep}`)) {
+    throw new Error(`${label} crossed the Pilot Artifact material boundary`);
+  }
+}
+
+async function assertTrackedTreeBytes({ checkout, commit, label }) {
+  const objectFormat = git(checkout, ["rev-parse", "--show-object-format"]).trim();
+  if (objectFormat !== "sha1") {
+    throw new Error(`${label} uses unsupported Git object format: ${objectFormat}`);
+  }
+  const entries = git(checkout, [
+    "ls-tree", "-r", "-z", "--format=%(objectmode)%x09%(objectname)%x09%(path)", commit,
+  ]).split("\0").filter(Boolean);
+  for (const entry of entries) {
+    const firstSeparator = entry.indexOf("\t");
+    const secondSeparator = entry.indexOf("\t", firstSeparator + 1);
+    if (firstSeparator <= 0 || secondSeparator <= firstSeparator) {
+      throw new Error(`${label} pinned tree emitted an invalid row`);
+    }
+    const mode = entry.slice(0, firstSeparator);
+    const expectedObjectId = entry.slice(firstSeparator + 1, secondSeparator);
+    const relativePath = entry.slice(secondSeparator + 1);
+    if (!mode.startsWith("100")) {
+      throw new Error(`${label} pinned tree contains unsupported mode ${mode}: ${relativePath}`);
+    }
+    const path = resolve(checkout, relativePath);
+    requireDescendant(checkout, path, `${label} tracked path`);
+    const pathStat = await lstat(path);
+    if (!pathStat.isFile() || pathStat.isSymbolicLink() || await realpath(path) !== path) {
+      throw new Error(`${label} tracked path is not a canonical regular file: ${relativePath}`);
+    }
+    const executable = (pathStat.mode & 0o111) !== 0;
+    if (executable !== (mode === "100755")) {
+      throw new Error(`${label} tracked mode differs from the pinned tree: ${relativePath}`);
+    }
+    const bytes = await readFile(path);
+    const actualObjectId = createHash("sha1")
+      .update(`blob ${bytes.length}\0`)
+      .update(bytes)
+      .digest("hex");
+    if (actualObjectId !== expectedObjectId) {
+      throw new Error(`${label} tracked bytes differ from the pinned tree: ${relativePath}`);
+    }
+  }
+}
+
+export async function assertSealedCheckoutState({
+  checkout,
+  commit,
+  label,
+  allowedIgnoredPrefixes = [],
+  allowedIgnoredDigestSha256 = null,
+  requireAllowedIgnoredDigest = false,
+  allowIgnoredSymlinks = false,
+}) {
+  const [canonicalCheckout, gitDirectoryStat] = await Promise.all([
+    realpath(checkout),
+    lstat(resolve(checkout, ".git")),
+  ]);
+  if (!gitDirectoryStat.isDirectory() || gitDirectoryStat.isSymbolicLink()) {
+    throw new Error(`${label} .git must be a non-symlink directory`);
+  }
+  const gitTopLevel = await realpath(git(checkout, ["rev-parse", "--show-toplevel"]).trim());
+  if (gitTopLevel !== canonicalCheckout) {
+    throw new Error(`${label} Git worktree redirected outside the canonical checkout`);
+  }
+  const head = git(checkout, ["rev-parse", "HEAD"]).trim();
+  if (head !== commit) throw new Error(`${label} HEAD changed: expected ${commit}, got ${head}`);
+  await assertTrackedTreeBytes({ checkout: canonicalCheckout, commit, label });
+  const entries = git(checkout, [
+    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching",
+  ]).split("\0").filter(Boolean);
+  const rejected = entries.filter((entry) => {
+    const status = entry.slice(0, 2);
+    const path = entry.slice(3);
+    return status !== "!!" || !allowedIgnoredPrefixes.some(
+      (prefix) => path === prefix || path.startsWith(prefix),
+    );
+  });
+  if (rejected.length > 0) {
+    throw new Error(`${label} contains unsealed content: ${rejected.join(", ")}`);
+  }
+  const allowedEntries = entries.filter((entry) => entry.slice(0, 2) === "!!");
+  if (allowedEntries.length > 0 && !allowIgnoredSymlinks) {
+    for (const prefix of allowedIgnoredPrefixes) {
+      await assertNoSymlinkDescendants(canonicalCheckout, resolve(canonicalCheckout, prefix));
+    }
+  }
+  if (allowedEntries.length > 0 && requireAllowedIgnoredDigest && !allowedIgnoredDigestSha256) {
+    throw new Error(`${label} contains executable build content without a runner digest`);
+  }
+  if (allowedIgnoredDigestSha256) {
+    const actualDigest = await runtimeMaterialSha256(canonicalCheckout, allowedIgnoredPrefixes);
+    if (actualDigest !== allowedIgnoredDigestSha256) {
+      throw new Error(`${label} executable build content differs from the runner digest`);
+    }
+  }
+}
+
+async function assertNoSymlinkDescendants(root, path) {
+  let pathStat;
+  try {
+    pathStat = await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  requireDescendant(root, path, "Ignored Pilot output");
+  if (pathStat.isSymbolicLink()) {
+    throw new Error(`Ignored Pilot output contains a symlink: ${relative(root, path)}`);
+  }
+  if (!pathStat.isDirectory()) return;
+  for (const child of await readdir(path)) {
+    await assertNoSymlinkDescendants(root, resolve(path, child));
+  }
+}
+
+function pathAtOrBelow(root, path) {
+  const child = relative(root, path);
+  return child === "" || (child !== ".." && !child.startsWith(`..${sep}`));
+}
+
+async function runtimeMaterialRows(root, path, rows, allowedRoots, trackedPaths) {
+  let pathStat;
+  try {
+    pathStat = await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  const relativePath = relative(root, path);
+  requireDescendant(root, path, "Upstream runtime material");
+  if (pathStat.isSymbolicLink()) {
+    const canonicalTarget = await realpath(path);
+    requireDescendant(root, canonicalTarget, "Upstream runtime material symlink target");
+    const targetRelative = relative(root, canonicalTarget);
+    const withinRuntimeMaterial = allowedRoots.some((allowedRoot) =>
+      pathAtOrBelow(allowedRoot, canonicalTarget));
+    const trackedTarget = trackedPaths.some((trackedPath) =>
+      trackedPath === targetRelative || trackedPath.startsWith(`${targetRelative}/`));
+    if (!withinRuntimeMaterial && !trackedTarget) {
+      throw new Error(`Upstream runtime symlink target is not sealed: ${relativePath}`);
+    }
+    rows.push(`${relativePath}\0symlink\0${await readlink(path)}`);
+    return;
+  }
+  if (pathStat.isDirectory()) {
+    const children = (await readdir(path)).sort();
+    for (const child of children) {
+      await runtimeMaterialRows(root, resolve(path, child), rows, allowedRoots, trackedPaths);
+    }
+    return;
+  }
+  if (!pathStat.isFile() || await realpath(path) !== path) {
+    throw new Error(`Upstream runtime material is not a canonical regular file: ${relativePath}`);
+  }
+  const bytes = await readFile(path);
+  rows.push(`${relativePath}\0${pathStat.mode & 0o777}\0${sha256(bytes)}`);
+}
+
+export async function runtimeMaterialSha256(checkout, prefixes = UPSTREAM_RUNTIME_PREFIXES) {
+  const canonicalCheckout = await realpath(checkout);
+  const allowedRoots = prefixes.map((prefix) => resolve(canonicalCheckout, prefix));
+  const trackedPaths = git(canonicalCheckout, ["ls-files", "-z"])
+    .split("\0")
+    .filter(Boolean);
+  const rows = [];
+  for (const prefix of [...prefixes].sort()) {
+    await runtimeMaterialRows(
+      canonicalCheckout,
+      resolve(canonicalCheckout, prefix),
+      rows,
+      allowedRoots,
+      trackedPaths,
+    );
+  }
+  return sha256(rows.sort().join("\n"));
+}
+
+async function requirePinnedCheckout({
+  artifactRoot,
+  path,
+  expectedPath,
+  commit,
+  label,
+  allowedIgnoredPrefixes,
+  allowedIgnoredDigestSha256,
+  requireAllowedIgnoredDigest,
+  allowIgnoredSymlinks,
+}) {
+  if (resolve(path) !== resolve(expectedPath)) {
+    throw new Error(`${label} path changed from the sealed plan`);
+  }
+  const pathStat = await lstat(path);
+  if (!pathStat.isDirectory() || pathStat.isSymbolicLink()) {
+    throw new Error(`${label} must be a non-symlink directory`);
+  }
+  const [canonicalRoot, canonicalCheckout] = await Promise.all([
+    realpath(artifactRoot),
+    realpath(path),
+  ]);
+  requireDescendant(canonicalRoot, canonicalCheckout, label);
+  if (canonicalCheckout !== resolve(canonicalRoot, relative(artifactRoot, expectedPath))) {
+    throw new Error(`${label} canonical path changed from the sealed plan`);
+  }
+  await assertSealedCheckoutState({
+    checkout: canonicalCheckout,
+    commit,
+    label,
+    allowedIgnoredPrefixes,
+    allowedIgnoredDigestSha256,
+    requireAllowedIgnoredDigest,
+    allowIgnoredSymlinks,
+  });
+  return canonicalCheckout;
+}
+
+async function validateSealedPlanFiles(approvedRoot) {
+  const [planText, manifestText, sealText] = await Promise.all([
+    readFile(resolve(approvedRoot, "pilot-plan.json"), "utf8"),
+    readFile(resolve(approvedRoot, "corpus-manifest.json"), "utf8"),
+    readFile(resolve(approvedRoot, PLAN_SEAL_FILE), "utf8"),
+  ]);
+  const plan = JSON.parse(planText);
+  const sourceRepository = await realpath(plan.sourceRepository);
+  const expectedPlan = buildPilotPlan(sourceRepository, approvedRoot);
+  const expectedPlanText = jsonText(expectedPlan);
+  if (planText !== expectedPlanText) {
+    throw new Error("Pilot plan differs from the deterministic prepared plan");
+  }
+  const manifest = buildCorpusManifest(sourceRepository);
+  const expectedManifestText = jsonText(manifest);
+  if (manifestText !== expectedManifestText) {
+    throw new Error("Analysis Corpus manifest differs from the deterministic snapshot corpus");
+  }
+  const expectedSealText = jsonText(buildPlanSeal({
+    plan: expectedPlan,
+    planText: expectedPlanText,
+    manifest,
+    manifestText: expectedManifestText,
+  }));
+  if (sealText !== expectedSealText) {
+    throw new Error("Pilot plan seal or bound digests changed");
+  }
+  return { plan, manifest, sealText };
+}
+
+export function runtimeDigestBeforePhase(metrics, phase) {
+  return phase === "incrementalRefresh"
+    ? metrics.incrementalRefresh?.runtimeMaterialSha256 ?? metrics.fullAnalysis?.runtimeMaterialSha256
+    : metrics.fullAnalysis?.runtimeMaterialSha256;
+}
+
+export function snapshotDigestBeforePhase(metrics, phase) {
+  return phase === "incrementalRefresh"
+    ? metrics.incrementalRefresh?.snapshotOutputSha256 ?? metrics.fullAnalysis?.snapshotOutputSha256
+    : metrics.fullAnalysis?.snapshotOutputSha256;
+}
+
+export async function validateSealedPilotRun(artifactRoot, phase) {
+  const approvedRoot = await requireApprovedPilotOutput(
+    artifactRoot,
+    "Understand-Anything budget runner output",
+  );
+  const { plan, manifest, sealText } = await validateSealedPlanFiles(approvedRoot);
+  const metrics = await readJson(resolve(approvedRoot, "run-metrics.json"));
+  const priorRuntimeDigest = runtimeDigestBeforePhase(metrics, phase);
+  const priorSnapshotDigest = snapshotDigestBeforePhase(metrics, phase);
+  await Promise.all([
+    requirePinnedCheckout({
+      artifactRoot: approvedRoot,
+      path: plan.snapshotCheckout,
+      expectedPath: resolve(approvedRoot, "analysis-snapshot"),
+      commit: ANALYSIS_SNAPSHOT,
+      label: "Analysis Snapshot checkout",
+      allowedIgnoredPrefixes: [".ua/", ".understand-anything/"],
+      allowedIgnoredDigestSha256: priorSnapshotDigest,
+      requireAllowedIgnoredDigest: true,
+    }),
+    requirePinnedCheckout({
+      artifactRoot: approvedRoot,
+      path: plan.upstream.checkout,
+      expectedPath: resolve(approvedRoot, "understand-anything"),
+      commit: UPSTREAM_COMMIT,
+      label: "Understand-Anything checkout",
+      allowedIgnoredPrefixes: UPSTREAM_RUNTIME_PREFIXES,
+      allowedIgnoredDigestSha256: priorRuntimeDigest,
+      requireAllowedIgnoredDigest: true,
+      allowIgnoredSymlinks: true,
+    }),
+  ]);
+  const promptFile = phase === "fullAnalysis"
+    ? "codex-prompt.md"
+    : "incremental-codex-prompt.md";
+  const promptText = await readFile(resolve(approvedRoot, promptFile), "utf8");
+  if (sha256(promptText) !== JSON.parse(sealText).phaseInvocations[phase]?.promptSha256) {
+    throw new Error(`${phase} prompt digest changed from the sealed plan`);
+  }
+  return { artifactRoot: approvedRoot, plan, manifest, promptFile, promptText };
 }
 
 async function ensurePinnedCheckout({ source, destination, commit, label }) {
@@ -460,7 +826,7 @@ async function writeSnapshotIgnore(snapshotCheckout, manifest) {
 
 async function prepareCommand(args) {
   const options = parseOptions(args);
-  const repo = options.repo ? resolve(options.repo) : process.cwd();
+  const repo = await realpath(options.repo ? resolve(options.repo) : process.cwd());
   const artifactRoot = await requireApprovedPilotOutput(
     options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
     "Understand-Anything prepare output",
@@ -489,26 +855,33 @@ async function prepareCommand(args) {
     throw new Error(`Analysis Snapshot is not clean after local exclusions:\n${snapshotStatus}`);
   }
 
+  const { seal, sealSha256 } = await writeSealedPlanFiles({ artifactRoot, plan, manifest });
+  const initialSnapshotOutputSha256 = await runtimeMaterialSha256(
+    plan.snapshotCheckout,
+    [".ua/", ".understand-anything/"],
+  );
+  const initialRuntimeMaterialSha256 = await runtimeMaterialSha256(plan.upstream.checkout);
   await Promise.all([
-    writeFile(resolve(artifactRoot, "corpus-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8"),
-    writeFile(resolve(artifactRoot, "pilot-plan.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8"),
-    writeFile(resolve(artifactRoot, "codex-prompt.md"), buildCodexPrompt(plan), "utf8"),
-    writeFile(
-      resolve(artifactRoot, "incremental-codex-prompt.md"),
-      buildCodexPrompt(plan, "incrementalRefresh"),
-      "utf8",
-    ),
     writeFile(resolve(artifactRoot, "prepare-result.json"), `${JSON.stringify({
       snapshotHead,
       upstreamHead,
       snapshotClean: true,
       globalInstallerUsed: false,
       symlinksCreated: false,
+      planSealSha256: sealSha256,
+      planSha256: seal.planSha256,
+      corpusSha256: seal.corpusSha256,
+      commandSha256: Object.fromEntries(PHASES.map((phase) => [
+        phase,
+        seal.phaseInvocations[phase].commandSha256,
+      ])),
     }, null, 2)}\n`, "utf8"),
     writeFile(resolve(artifactRoot, "run-metrics.json"), `${JSON.stringify({
       fullAnalysis: {
         status: "not-run", measurement: BUDGET_MEASUREMENT,
         budgetMilliseconds: FULL_ANALYSIS_BUDGET_MS, elapsedMilliseconds: null,
+        snapshotOutputSha256: initialSnapshotOutputSha256,
+        runtimeMaterialSha256: initialRuntimeMaterialSha256,
       },
       incrementalRefresh: {
         status: "not-run", measurement: BUDGET_MEASUREMENT,
@@ -536,15 +909,15 @@ async function prepareCommand(args) {
 
 async function runBudgetedCommand(args) {
   const options = parseOptions(args);
-  const artifactRoot = await requireApprovedPilotOutput(
-    options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
-    "Understand-Anything budget runner output",
-  );
   const phase = options.phase;
   if (!PHASES.includes(phase)) {
     throw new Error("--phase must be fullAnalysis or incrementalRefresh");
   }
-  const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"));
+  const validated = await validateSealedPilotRun(
+    options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
+    phase,
+  );
+  const { artifactRoot, plan, promptText } = validated;
   const budgetMilliseconds = plan.budgetsMilliseconds?.[phase];
   const requiredBudget = phase === "fullAnalysis"
     ? FULL_ANALYSIS_BUDGET_MS
@@ -564,11 +937,6 @@ async function runBudgetedCommand(args) {
   if (invocation.promptFile !== expectedPromptFile) {
     throw new Error(`${phase} prompt contract changed`);
   }
-  const promptText = await readFile(resolve(artifactRoot, expectedPromptFile), "utf8");
-  if (promptText !== buildCodexPrompt(plan, phase)) {
-    throw new Error(`${phase} prompt content changed`);
-  }
-
   const metric = await runBudgetedPilotPhase({
     phase,
     budgetMilliseconds,
@@ -577,6 +945,30 @@ async function runBudgetedCommand(args) {
     env: { ...buildCodexChildEnv(), ...plan.environment },
     stdinText: promptText,
   });
+  metric.runtimeMaterialSha256 = await runtimeMaterialSha256(plan.upstream.checkout);
+  metric.snapshotOutputSha256 = await runtimeMaterialSha256(
+    plan.snapshotCheckout,
+    [".ua/", ".understand-anything/"],
+  );
+  await Promise.all([
+    assertSealedCheckoutState({
+      checkout: plan.snapshotCheckout,
+      commit: ANALYSIS_SNAPSHOT,
+      label: "Analysis Snapshot checkout after runner",
+      allowedIgnoredPrefixes: [".ua/", ".understand-anything/"],
+      allowedIgnoredDigestSha256: metric.snapshotOutputSha256,
+      requireAllowedIgnoredDigest: true,
+    }),
+    assertSealedCheckoutState({
+      checkout: plan.upstream.checkout,
+      commit: UPSTREAM_COMMIT,
+      label: "Understand-Anything checkout after local build",
+      allowedIgnoredPrefixes: UPSTREAM_RUNTIME_PREFIXES,
+      allowedIgnoredDigestSha256: metric.runtimeMaterialSha256,
+      requireAllowedIgnoredDigest: true,
+      allowIgnoredSymlinks: true,
+    }),
+  ]);
   const metricsPath = resolve(artifactRoot, "run-metrics.json");
   const metrics = await readJson(metricsPath);
   metrics[phase] = metric;
@@ -650,10 +1042,30 @@ async function verifyArtifactCommand(args) {
     options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
     "Understand-Anything verification output",
   );
-  const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"));
-  const manifest = await readJson(resolve(artifactRoot, "corpus-manifest.json"));
+  const { plan, manifest } = await validateSealedPlanFiles(artifactRoot);
   const prepared = await readJson(resolve(artifactRoot, "prepare-result.json"));
   const metrics = await readJson(resolve(artifactRoot, "run-metrics.json"));
+  await assertSealedCheckoutState({
+    checkout: plan.snapshotCheckout,
+    commit: ANALYSIS_SNAPSHOT,
+    label: "Final Analysis Snapshot checkout",
+    allowedIgnoredPrefixes: [".ua/", ".understand-anything/"],
+    allowedIgnoredDigestSha256: metrics.incrementalRefresh?.snapshotOutputSha256,
+    requireAllowedIgnoredDigest: true,
+  });
+  const finalRuntimeMaterialSha256 = await runtimeMaterialSha256(plan.upstream.checkout);
+  if (finalRuntimeMaterialSha256 !== metrics.incrementalRefresh?.runtimeMaterialSha256) {
+    throw new Error("Upstream executable build content differs from the final runner digest");
+  }
+  await assertSealedCheckoutState({
+    checkout: plan.upstream.checkout,
+    commit: UPSTREAM_COMMIT,
+    label: "Final Understand-Anything checkout",
+    allowedIgnoredPrefixes: UPSTREAM_RUNTIME_PREFIXES,
+    allowedIgnoredDigestSha256: metrics.incrementalRefresh?.runtimeMaterialSha256,
+    requireAllowedIgnoredDigest: true,
+    allowIgnoredSymlinks: true,
+  });
   const calibration = await readJson(resolve(artifactRoot, "calibration-answer.json"));
   const uaDirectory = resolve(plan.snapshotCheckout, ".ua");
   const graph = await readJson(resolve(uaDirectory, "knowledge-graph.json"));
@@ -679,6 +1091,7 @@ async function verifyArtifactCommand(args) {
         metric?.budgetMilliseconds !== budget || metric?.timedOut !== false ||
         metric?.exitCode !== 0 || metric?.phase !== name || metric?.signal !== null ||
         metric?.spawnError !== null || metric?.commandSha256 !== expectedCommandSha256 ||
+        !metric?.runtimeMaterialSha256 || !metric?.snapshotOutputSha256 ||
         !metric?.startedAt || !metric?.finishedAt) {
       errors.push(`${name} timing evidence was not issued by the budgeted child runner`);
     } else if (metric.status !== "completed" || !Number.isFinite(metric.elapsedMilliseconds)) {
