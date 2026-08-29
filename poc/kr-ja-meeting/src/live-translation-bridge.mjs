@@ -92,7 +92,15 @@ export class LiveTranslationBridge {
               this.#record("gemini-output-received", context, { result: "received" });
             }
           }
-          captureChain = captureChain.then(() => sink.capture(pcm));
+          captureChain = captureChain.then(async () => {
+            const capture = await sink.capture(pcm);
+            if (Number.isFinite(capture?.queuedAfterMs)) {
+              this.#record("livekit-queue-updated", context, {
+                queueDurationMs: capture.queuedAfterMs,
+                result: "queued",
+              });
+            }
+          });
           return captureChain;
         },
       });

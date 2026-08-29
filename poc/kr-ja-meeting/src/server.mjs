@@ -9,7 +9,10 @@ import { GeminiLiveTranslateSocket } from "./gemini-live-socket.mjs";
 import { MemoryResumptionHandleStore } from "./gemini-session.mjs";
 import { LiveTranslationBridge } from "./live-translation-bridge.mjs";
 import { LiveKitAudioGateway } from "./livekit-audio-gateway.mjs";
-import { MeetingEventRecorder } from "./meeting-event-recorder.mjs";
+import {
+  MeetingEventRecorder,
+  MemoryMeetingSegmentTraceStore,
+} from "./meeting-event-recorder.mjs";
 import { createMeetingHttpServer } from "./meeting-http.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -20,11 +23,10 @@ const livekitApiKey = process.env.LIVEKIT_API_KEY ?? "devkey";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const roomName = process.env.MEETING_ROOM ?? "kr-ja-browser-poc";
+const segmentTraceStore = new MemoryMeetingSegmentTraceStore();
 const eventRecorder = new MeetingEventRecorder({
   meetingId: roomName,
-  write(event) {
-    console.info(JSON.stringify({ source: "meeting-timeline", ...event }));
-  },
+  write: (event) => segmentTraceStore.write(event),
 });
 
 if (!geminiApiKey) {
@@ -78,6 +80,7 @@ let closing = false;
 async function close() {
   if (closing) return;
   closing = true;
+  segmentTraceStore.close();
   handles.clearMeeting(roomName);
   server.close();
   await translationBridge.abort().catch(() => {});

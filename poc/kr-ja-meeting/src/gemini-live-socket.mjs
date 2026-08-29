@@ -286,7 +286,7 @@ export class GeminiLiveTranslateSocket {
         utteranceId: this.#utteranceId,
         targetLanguage: this.#targetLanguage,
         result: outcome,
-        ...(errorCode ? { errorCode } : {}),
+        ...(errorCode ? { errorCode, reconnectReason: errorCode } : {}),
       });
     } catch {
       // Diagnostics must not control session recovery.

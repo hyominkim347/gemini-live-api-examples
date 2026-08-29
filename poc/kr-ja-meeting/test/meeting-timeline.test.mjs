@@ -322,7 +322,13 @@ test("Gemini input and output are correlated without claiming browser playout", 
     eventRecorder: recorder,
     drainQuietMilliseconds: 0,
     audioGateway: {
-      async translationSink() { return { async capture() {} }; },
+      async translationSink() {
+        return {
+          async capture() {
+            return { queuedAfterMs: 240 };
+          },
+        };
+      },
       async subscribeOriginal(_trackId, onFrame) {
         originalFrame = onFrame;
         return { async close() {} };
@@ -356,6 +362,7 @@ test("Gemini input and output are correlated without claiming browser playout", 
     "livekit-subscribe-succeeded",
     "gemini-input-received",
     "gemini-output-received",
+    "livekit-queue-updated",
     "gemini-output-completed",
     "resources-closed",
   ]);

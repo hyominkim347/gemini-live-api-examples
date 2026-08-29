@@ -30,6 +30,7 @@ const EVENT_TYPES = new Set([
   "livekit-subscribe-started",
   "livekit-subscribe-succeeded",
   "livekit-subscribe-failed",
+  "livekit-queue-updated",
   "listening-mode-changed",
   "listening-mode-restored",
   "listening-gain-applied",
@@ -54,7 +55,25 @@ const STRING_FIELDS = [
   "listeningMode",
   "trackId",
   "trackKind",
+  "reconnectReason",
 ];
+
+const NUMBER_FIELDS = new Map([
+  ["detectedAt", (value) => Number.isFinite(value)],
+  ["gain", (value) => Number.isFinite(value) && value >= 0 && value <= 1],
+  ["queueDurationMs", (value) => Number.isFinite(value) && value >= 0],
+]);
+
+const INPUT_FIELDS = new Set(["type", ...STRING_FIELDS, ...NUMBER_FIELDS.keys()]);
+const STORED_FIELDS = new Set([
+  ...INPUT_FIELDS,
+  "meetingId",
+  "timestamp",
+  "stage",
+]);
+const TRACE_READ_ROLES = new Set(["operator", "developer"]);
+
+export const SEGMENT_TRACE_RETENTION_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
 
 export class MeetingEventRecorder {
   #meetingId;
@@ -71,6 +90,7 @@ export class MeetingEventRecorder {
   }
 
   record(event = {}) {
+    rejectUnsupportedFields(event, INPUT_FIELDS);
     if (!EVENT_TYPES.has(event.type)) throw new Error(`unsupported meeting event type: ${event.type}`);
     const timestamp = this.#clock();
     if (!Number.isFinite(timestamp)) throw new Error("event timestamp must be finite");
@@ -83,15 +103,10 @@ export class MeetingEventRecorder {
       requireString(event[field], field);
       safe[field] = event[field];
     }
-    if (event.gain !== undefined) {
-      if (!Number.isFinite(event.gain) || event.gain < 0 || event.gain > 1) {
-        throw new Error("gain must be between zero and one");
-      }
-      safe.gain = event.gain;
-    }
-    if (event.detectedAt !== undefined) {
-      if (!Number.isFinite(event.detectedAt)) throw new Error("detectedAt must be finite");
-      safe.detectedAt = event.detectedAt;
+    for (const [field, isValid] of NUMBER_FIELDS) {
+      if (event[field] === undefined) continue;
+      if (!isValid(event[field])) throw new Error(`${field} is invalid`);
+      safe[field] = event[field];
     }
     safe.timestamp = timestamp;
     try {
@@ -103,10 +118,122 @@ export class MeetingEventRecorder {
   }
 }
 
+export class MemoryMeetingSegmentTraceStore {
+  #clock;
+  #retentionMilliseconds;
+  #scheduleExpiry;
+  #cancelExpiry;
+  #expiryTimer = null;
+  #records = [];
+
+  constructor({
+    clock = Date.now,
+    retentionMilliseconds = SEGMENT_TRACE_RETENTION_MILLISECONDS,
+    scheduleExpiry = setTimeout,
+    cancelExpiry = clearTimeout,
+  } = {}) {
+    if (typeof clock !== "function") throw new Error("trace store clock must be a function");
+    if (!Number.isFinite(retentionMilliseconds) || retentionMilliseconds <= 0) {
+      throw new Error("trace retention must be a positive number");
+    }
+    if (typeof scheduleExpiry !== "function" || typeof cancelExpiry !== "function") {
+      throw new Error("trace expiry scheduler must provide schedule and cancel functions");
+    }
+    this.#clock = clock;
+    this.#retentionMilliseconds = retentionMilliseconds;
+    this.#scheduleExpiry = scheduleExpiry;
+    this.#cancelExpiry = cancelExpiry;
+  }
+
+  write(event = {}) {
+    rejectUnsupportedFields(event, STORED_FIELDS);
+    if (!EVENT_TYPES.has(event.type)) throw new Error(`unsupported meeting event type: ${event.type}`);
+    requireString(event.meetingId, "meetingId");
+    if (!Number.isFinite(event.timestamp)) throw new Error("event timestamp must be finite");
+    const storedAt = this.#now();
+    this.#purge(storedAt);
+    this.#records.push({
+      event: Object.freeze({ ...event, stage: traceStage(event.type) }),
+      storedAt,
+    });
+    this.#armExpiry(storedAt);
+  }
+
+  query({ role, meetingId, participantId, utteranceId, stage } = {}) {
+    if (!TRACE_READ_ROLES.has(role)) throw new Error("segment trace role is not authorized");
+    const now = this.#now();
+    this.#purge(now);
+    this.#armExpiry(now);
+    return this.#records
+      .map(({ event }) => event)
+      .filter((event) => meetingId === undefined || event.meetingId === meetingId)
+      .filter((event) => participantId === undefined || event.participantId === participantId)
+      .filter((event) => utteranceId === undefined || event.utteranceId === utteranceId)
+      .filter((event) => stage === undefined || event.stage === stage);
+  }
+
+  close() {
+    if (this.#expiryTimer !== null) this.#cancelExpiry(this.#expiryTimer);
+    this.#expiryTimer = null;
+    this.#records = [];
+  }
+
+  #now() {
+    const now = this.#clock();
+    if (!Number.isFinite(now)) throw new Error("trace store clock must return a finite number");
+    return now;
+  }
+
+  #purge(now) {
+    const oldestAllowed = now - this.#retentionMilliseconds;
+    this.#records = this.#records.filter(({ storedAt }) => storedAt > oldestAllowed);
+  }
+
+  #armExpiry(now) {
+    if (this.#expiryTimer !== null) this.#cancelExpiry(this.#expiryTimer);
+    this.#expiryTimer = null;
+    const oldest = this.#records[0];
+    if (!oldest) return;
+    const delay = Math.max(0, oldest.storedAt + this.#retentionMilliseconds - now);
+    this.#expiryTimer = this.#scheduleExpiry(() => {
+      this.#expiryTimer = null;
+      const expiredAt = this.#now();
+      this.#purge(expiredAt);
+      this.#armExpiry(expiredAt);
+    }, delay);
+    this.#expiryTimer?.unref?.();
+  }
+}
+
 export function noopMeetingEventRecorder() {
   return { record() {} };
 }
 
 function requireString(value, label) {
   if (typeof value !== "string" || !value) throw new Error(`${label} must be a non-empty string`);
+}
+
+function rejectUnsupportedFields(event, allowedFields) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    throw new Error("meeting event must be an object");
+  }
+  for (const field of Object.keys(event)) {
+    if (!allowedFields.has(field)) throw new Error(`unsupported meeting event field: ${field}`);
+  }
+}
+
+function traceStage(type) {
+  if (type.startsWith("gemini-retry-")) return "provider-reconnect";
+  if (type.startsWith("gemini-")) return "gemini-provider";
+  if (type.startsWith("livekit-")) return "livekit-webrtc";
+  if (type.startsWith("translation-focus-") || type.startsWith("overlap-")) {
+    return "focus-control";
+  }
+  if (type.startsWith("playout-") || type.startsWith("listening-")) {
+    return "browser-playout";
+  }
+  if (["utterance-completed", "utterance-aborted", "resources-closed"].includes(type)) {
+    return "meeting-lifecycle";
+  }
+  return "browser-input";
 }

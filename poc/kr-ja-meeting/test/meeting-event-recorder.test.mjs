@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MeetingEventRecorder } from "../src/meeting-event-recorder.mjs";
+import {
+  MeetingEventRecorder,
+  MemoryMeetingSegmentTraceStore,
+  SEGMENT_TRACE_RETENTION_MILLISECONDS,
+} from "../src/meeting-event-recorder.mjs";
 
-test("record emits only the privacy-safe allowlist with an injected timestamp", () => {
+test("record emits the privacy-safe allowlist with an injected timestamp", () => {
   const written = [];
   const recorder = new MeetingEventRecorder({
     meetingId: "meeting-1",
@@ -18,12 +22,6 @@ test("record emits only the privacy-safe allowlist with an injected timestamp", 
     language: "ja",
     targetLanguage: "ko",
     result: "started",
-    rawAudio: Buffer.from("private audio"),
-    nested: {
-      transcript: "private words",
-      credentials: { apiKey: "secret-key" },
-      resumptionHandle: "secret-handle",
-    },
   });
 
   assert.deepEqual(written, [{
@@ -36,11 +34,31 @@ test("record emits only the privacy-safe allowlist with an injected timestamp", 
     timestamp: 1_234,
     result: "started",
   }]);
-  assert.equal(JSON.stringify(written).includes("private"), false);
-  assert.equal(JSON.stringify(written).includes("secret"), false);
 });
 
-test("record rejects unknown event types and invalid safe-field values", () => {
+test("record rejects forbidden content and credential fields instead of silently logging them", () => {
+  const recorder = new MeetingEventRecorder({ meetingId: "meeting-1", write() {} });
+  const forbiddenFields = [
+    "rawAudio",
+    "pcm",
+    "transcript",
+    "translation",
+    "glossary",
+    "apiKey",
+    "token",
+    "resumptionHandle",
+    "providerPayload",
+  ];
+
+  for (const field of forbiddenFields) {
+    assert.throws(
+      () => recorder.record({ type: "speech-started", [field]: "private" }),
+      new RegExp(`unsupported meeting event field: ${field}`),
+    );
+  }
+});
+
+test("record rejects unknown event types and invalid allowlisted values", () => {
   const recorder = new MeetingEventRecorder({ meetingId: "meeting-1", write() {} });
 
   assert.throws(() => recorder.record({ type: "raw-transcript", result: "ok" }), /event type/);
@@ -48,4 +66,100 @@ test("record rejects unknown event types and invalid safe-field values", () => {
     () => recorder.record({ type: "speech-started", participantId: { raw: "participant-1" } }),
     /participantId/,
   );
+});
+
+test("segment trace separates browser, focus, Gemini, LiveKit, reconnect, and playout stages", () => {
+  let now = 1_000;
+  const store = new MemoryMeetingSegmentTraceStore({ clock: () => now });
+  const recorder = new MeetingEventRecorder({
+    meetingId: "meeting-1",
+    clock: () => now,
+    write: (event) => store.write(event),
+  });
+  const context = {
+    participantId: "participant-1",
+    utteranceId: "utterance-1",
+    targetLanguage: "ko",
+    result: "succeeded",
+  };
+
+  recorder.record({ type: "speech-started", ...context });
+  recorder.record({ type: "translation-focus-selected", ...context });
+  recorder.record({ type: "gemini-output-received", ...context });
+  recorder.record({
+    type: "gemini-retry-started",
+    ...context,
+    reconnectReason: "provider-session-missing",
+  });
+  recorder.record({ type: "livekit-queue-updated", ...context, queueDurationMs: 240 });
+  recorder.record({ type: "playout-started", ...context });
+
+  assert.deepEqual(
+    store.query({ role: "operator", meetingId: "meeting-1" })
+      .map(({ stage, utteranceId, queueDurationMs, reconnectReason }) => ({
+        stage,
+        utteranceId,
+        ...(queueDurationMs === undefined ? {} : { queueDurationMs }),
+        ...(reconnectReason === undefined ? {} : { reconnectReason }),
+      })),
+    [
+      { stage: "browser-input", utteranceId: "utterance-1" },
+      { stage: "focus-control", utteranceId: "utterance-1" },
+      { stage: "gemini-provider", utteranceId: "utterance-1" },
+      {
+        stage: "provider-reconnect",
+        utteranceId: "utterance-1",
+        reconnectReason: "provider-session-missing",
+      },
+      { stage: "livekit-webrtc", utteranceId: "utterance-1", queueDurationMs: 240 },
+      { stage: "browser-playout", utteranceId: "utterance-1" },
+    ],
+  );
+});
+
+test("segment trace is role-gated and expires records after seven days", () => {
+  let now = 10_000;
+  let scheduledExpiry;
+  let scheduledDelay;
+  const store = new MemoryMeetingSegmentTraceStore({
+    clock: () => now,
+    scheduleExpiry(callback, delay) {
+      scheduledExpiry = callback;
+      scheduledDelay = delay;
+      return { unref() {} };
+    },
+    cancelExpiry() {},
+  });
+  const recorder = new MeetingEventRecorder({
+    meetingId: "meeting-1",
+    clock: () => 123,
+    write: (event) => store.write(event),
+  });
+  recorder.record({
+    type: "gemini-input-received",
+    participantId: "participant-1",
+    utteranceId: "utterance-1",
+    result: "received",
+  });
+
+  assert.equal(store.query({ role: "developer" }).length, 1);
+  assert.throws(() => store.query({ role: "participant" }), /not authorized/);
+  assert.equal(scheduledDelay, SEGMENT_TRACE_RETENTION_MILLISECONDS);
+
+  now += SEGMENT_TRACE_RETENTION_MILLISECONDS - 1;
+  assert.equal(store.query({ role: "operator" }).length, 1);
+  now += 1;
+  scheduledExpiry();
+  assert.equal(store.query({ role: "operator" }).length, 0);
+});
+
+test("segment trace store cannot be used to bypass the recorder allowlist", () => {
+  const store = new MemoryMeetingSegmentTraceStore();
+
+  assert.throws(() => store.write({
+    type: "gemini-output-received",
+    meetingId: "meeting-1",
+    timestamp: 123,
+    providerPayload: { transcript: "private" },
+  }), /unsupported meeting event field: providerPayload/);
 });
