@@ -2,6 +2,19 @@ const FOREGROUND_GAIN = 1;
 const ORIGINAL_BACKGROUND_GAIN = 0.2;
 
 export class ListeningMixController {
+  planOriginalFallback({ listener, speakers } = {}) {
+    if (!listener?.id || !listener?.language || !Array.isArray(speakers)) {
+      throw new Error("listener and speakers are required");
+    }
+    const tracks = speakers
+      .filter(({ id }) => id !== listener.id)
+      .map((speaker) => {
+        if (!speaker?.id || !speaker?.language) throw new Error("each speaker is required");
+        return originalTrack(speaker.id, "foreground", FOREGROUND_GAIN, speaker.utteranceId);
+      });
+    return { mode: "original-fallback", tracks };
+  }
+
   planFor({ listener, speakers, focusSpeaker, mode = "translation-focused" } = {}) {
     if (!listener?.id || !listener?.language || !Array.isArray(speakers) || !focusSpeaker?.id) {
       throw new Error("listener, speakers, and focusSpeaker are required");

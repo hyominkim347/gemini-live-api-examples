@@ -1,5 +1,6 @@
 import { Room, RoomEvent, Track } from "/vendor/livekit-client.mjs";
 import { BrowserAudioPlayout } from "/public/browser-audio-playout.mjs";
+import { translationStatusView } from "/public/translation-status.mjs";
 import { syncAudioSubscriptions } from "/src/livekit-subscriptions.mjs";
 import { SpeechActivityDetector } from "/src/speech-activity-detector.mjs";
 
@@ -12,6 +13,7 @@ const modeCopy = {
   "original-check": "원음 확인 중 · 자동 복귀",
   "same-language-original": "같은 언어 원음",
   "focus-pending": "원음 청취 · 통역 초점 대기",
+  "original-fallback": "원음 정상 크기 · 통역 재연결 중",
 };
 
 const app = document.querySelector("#app");
@@ -96,13 +98,17 @@ function renderJoin() {
 
 function renderMeeting() {
   const active = activeParticipant();
+  const reconnectView = translationStatusView(snapshot.translationAvailability ?? "available");
   const featured = active ?? localState() ?? snapshot.participants[0];
   const featuredState = featured?.audio ?? { mode: "silent" };
   const target = active ? (active.language === "ko" ? "ja" : "ko") : null;
   const overlapWarning = snapshot.overlap?.detected
     ? `<p class="status-message meeting-status" role="status">${escapeHtml(snapshot.overlap.message)}</p>`
     : "";
-  return `${renderTopbar(active)}<main class="stage-layout">
+  const reconnectStatus = reconnectView
+    ? `<p class="status-message meeting-status" role="status">${escapeHtml(reconnectView.message)}</p>`
+    : "";
+  return `${renderTopbar(active, reconnectView)}<main class="stage-layout">
     <section class="stage-card" aria-label="현재 발화자">
       <div class="stage-ambient"></div>
       <div class="stage-copy">
@@ -120,6 +126,7 @@ function renderMeeting() {
     <aside class="stage-side">
       <div class="side-heading"><div><span class="concept-label">IN THE ROOM</span><h2>참가자 ${snapshot.participants.length}명</h2></div><span class="secure-copy">기록하지 않음</span></div>
       <div class="people-list">${snapshot.participants.map((state) => participantRow(state, active)).join("")}</div>
+      ${reconnectStatus}
       ${overlapWarning}
       ${meetingControls()}
       <p class="status-message meeting-status" aria-live="polite">${escapeHtml(statusMessage)}</p>
@@ -127,11 +134,11 @@ function renderMeeting() {
   </main><footer class="meeting-footer"><strong>${escapeHtml(localParticipant.name)}</strong><span>${modeCopy[localAudioState().mode]} · 실제 LiveKit room</span></footer>`;
 }
 
-function renderTopbar(active) {
+function renderTopbar(active, reconnectView) {
   return `<header class="topbar">
     <a class="brand" href="/" aria-label="Bridge 회의 홈"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span><span>Bridge</span></a>
     <div class="meeting-title"><strong>한국어 × 日本語</strong><span>실시간 통역 회의 · ${snapshot.participants.length}명</span></div>
-    <div class="meeting-health ${active ? "is-live" : ""}"><span class="live-dot"></span>${active ? "통역 중" : "준비됨"}</div>
+    <div class="meeting-health ${active ? "is-live" : ""}"><span class="live-dot"></span>${reconnectView?.healthLabel ?? (active ? "통역 중" : "준비됨")}</div>
     <button class="leave-button" type="button" data-global="leave">나가기</button>
   </header>`;
 }

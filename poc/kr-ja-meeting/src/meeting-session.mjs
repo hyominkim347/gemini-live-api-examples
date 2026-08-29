@@ -2,6 +2,7 @@ import { ListeningMixController } from "./listening-mix-controller.mjs";
 
 const SUPPORTED_LANGUAGES = new Set(["ko", "ja"]);
 const PERSISTENT_LISTENING_MODES = new Set(["translation-focused", "translation-only"]);
+const TRANSLATION_AVAILABILITIES = new Set(["available", "reconnecting"]);
 
 export class MeetingSession {
   #participantById = new Map();
@@ -9,6 +10,7 @@ export class MeetingSession {
   #persistentListeningModeById = new Map();
   #originalCheckByListenerId = new Map();
   #listeningMixController = new ListeningMixController();
+  #translationAvailability = "available";
 
   constructor(participants = []) {
     if (!Array.isArray(participants)) throw new Error("participants must be an array");
@@ -141,10 +143,22 @@ export class MeetingSession {
       : this.#persistentListeningModeById.get(listenerId);
   }
 
+  setTranslationAvailability(availability) {
+    if (!TRANSLATION_AVAILABILITIES.has(availability)) {
+      throw new Error(`unsupported translation availability: ${availability}`);
+    }
+    if (this.#translationAvailability === availability) return false;
+    this.#translationAvailability = availability;
+    return true;
+  }
+
   audioPlanFor(listenerId) {
     const listener = this.#requireParticipant(listenerId);
     const speakers = [...this.#participantById.values()]
       .filter(({ speech }) => speech === "speaking");
+    if (this.#translationAvailability === "reconnecting" && speakers.length > 0) {
+      return this.#listeningMixController.planOriginalFallback({ listener, speakers });
+    }
     if (!this.#translationFocusId) {
       if (speakers.length === 0) return { mode: "silent", tracks: [] };
       return this.#listeningMixController.planWithoutFocus({
@@ -165,6 +179,7 @@ export class MeetingSession {
 
   snapshot() {
     return {
+      translationAvailability: this.#translationAvailability,
       activeSpeakerId: this.#translationFocusId,
       translationFocusId: this.#translationFocusId,
       activeUtteranceId: this.activeUtteranceId,

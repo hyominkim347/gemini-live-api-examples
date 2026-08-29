@@ -167,3 +167,38 @@ test("original-check restores the listener's previous mode at its automatic utte
   session.startSpeech("ja-speaker", "utterance-2");
   assert.equal(session.audioPlanFor("ko-listener").mode, "translation-only");
 });
+
+test("provider reconnect uses normal original audio then restores each persistent listening mode", () => {
+  const session = new MeetingSession([
+    { id: "ja-speaker", name: "Yuki", language: "ja" },
+    { id: "ko-only", name: "민준", language: "ko" },
+    { id: "ko-mixed", name: "서연", language: "ko" },
+  ]);
+  session.setMicrophone("ja-speaker", true);
+  session.setMicrophone("ko-only", true);
+  session.startSpeech("ja-speaker", "utterance-1");
+  session.setListeningMode("ko-only", "translation-only");
+
+  session.setTranslationAvailability("reconnecting");
+
+  assert.deepEqual(session.audioPlanFor("ko-only"), {
+    mode: "original-fallback",
+    tracks: [{
+      trackId: "original:ja-speaker",
+      kind: "original",
+      role: "foreground",
+      gain: 1,
+      utteranceId: "utterance-1",
+    }],
+  });
+  assert.equal(session.audioPlanFor("ko-mixed").mode, "original-fallback");
+  assert.equal(session.snapshot().translationAvailability, "reconnecting");
+  assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-only").listeningMode, "translation-only");
+  assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-only").microphone, "unmuted");
+
+  session.setTranslationAvailability("available");
+
+  assert.equal(session.audioPlanFor("ko-only").mode, "translation-only");
+  assert.equal(session.audioPlanFor("ko-mixed").mode, "translation-focused");
+  assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-only").microphone, "unmuted");
+});

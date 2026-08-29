@@ -542,6 +542,52 @@ test("listening mode changes are participant-scoped and recorded once", async ()
   });
 });
 
+test("provider reconnect hook exposes fallback immediately without disconnecting the meeting", async () => {
+  let participantSequence = 0;
+  let now = 900;
+  const { service } = createService({
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    utteranceIdFactory: () => "utterance-1",
+    clock: () => now,
+  });
+  const speaker = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const listener = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(speaker.id, true);
+  await service.mic(listener.id, true);
+  await service.speechActivity({ participantId: speaker.id, type: "speech-start", observedAt: now });
+  await service.listeningMode(listener.id, "translation-only");
+
+  const reconnecting = await service.translationAvailability("reconnecting");
+
+  assert.equal(reconnecting.translationAvailability, "reconnecting");
+  assert.equal(reconnecting.translationAvailabilityChangedAt, 900);
+  assert.equal(reconnecting.participants.find(({ id }) => id === listener.id).listeningMode, "translation-only");
+  assert.equal(reconnecting.participants.find(({ id }) => id === listener.id).microphone, "unmuted");
+  assert.deepEqual(reconnecting.participants.find(({ id }) => id === listener.id).audio, {
+    mode: "original-fallback",
+    tracks: [{
+      trackId: `original:${speaker.id}`,
+      kind: "original",
+      role: "foreground",
+      gain: 1,
+      utteranceId: "utterance-1",
+    }],
+  });
+
+  now = 950;
+  const repeatedReconnect = await service.translationAvailability("reconnecting");
+  assert.equal(repeatedReconnect.translationAvailabilityChangedAt, 900);
+
+  now = 1_000;
+  const recovered = await service.translationAvailability("available");
+
+  assert.equal(recovered.translationAvailability, "available");
+  assert.equal(recovered.translationAvailabilityChangedAt, 1_000);
+  assert.equal(recovered.participants.find(({ id }) => id === listener.id).listeningMode, "translation-only");
+  assert.equal(recovered.participants.find(({ id }) => id === listener.id).audio.mode, "translation-only");
+  assert.equal(recovered.participants.find(({ id }) => id === listener.id).microphone, "unmuted");
+});
+
 test("automatic speech keeps its utterance id while an expired Gemini session retries", async () => {
   const sockets = [];
   const retryEvents = [];

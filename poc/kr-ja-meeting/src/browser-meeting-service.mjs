@@ -30,6 +30,7 @@ export class BrowserMeetingService {
   #issuedPlayoutContextByParticipantId = new Map();
   #translationStartLockouts = new Set();
   #parkedTranslation = null;
+  #translationAvailabilityChangedAt = null;
   #actionChain = Promise.resolve();
 
   constructor({
@@ -202,6 +203,7 @@ export class BrowserMeetingService {
     this.#recordPendingOverlapTransitions();
     const snapshot = {
       ...this.#session.snapshot(),
+      translationAvailabilityChangedAt: this.#translationAvailabilityChangedAt,
       speakingParticipantIds: focus.speakingParticipantIds,
       translationFocusId: focus.translationFocusId,
       focus: {
@@ -295,6 +297,17 @@ export class BrowserMeetingService {
           previousMode: change.previousMode,
           mode: change.mode,
         });
+      }
+      return this.snapshot();
+    });
+  }
+
+  translationAvailability(availability) {
+    return this.#enqueue(async () => {
+      const changed = this.#session.setTranslationAvailability(availability);
+      if (changed) {
+        this.#translationAvailabilityChangedAt = this.#eventTimestamp();
+        this.#recordListeningPlans();
       }
       return this.snapshot();
     });
