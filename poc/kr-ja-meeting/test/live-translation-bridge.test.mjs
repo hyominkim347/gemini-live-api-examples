@@ -93,6 +93,58 @@ test("a second speaker cannot overlap the active translation bridge", async () =
   await stop;
 });
 
+test("handoff drains and closes the focused bridge before subscribing the next speaker", async () => {
+  const calls = [];
+  const clients = [];
+  let originalFrame;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    drainQuietMilliseconds: 0,
+    audioGateway: {
+      async translationSink(language) {
+        calls.push(`sink:${language}`);
+        return { async capture() { calls.push("capture"); } };
+      },
+      async subscribeOriginal(trackName, onFrame) {
+        calls.push(`subscribe:${trackName}`);
+        originalFrame = onFrame;
+        return { async close() { calls.push(`unsubscribe:${trackName}`); } };
+      },
+    },
+    geminiFactory(options) {
+      const client = {
+        connect() { options.onSetupComplete(); },
+        sendActivityStart() { calls.push("activity-start"); return true; },
+        sendActivityEnd() { calls.push("activity-end"); return true; },
+        sendPcm16() { return true; },
+        close() { calls.push("gemini-close"); },
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  originalFrame(Buffer.from([1, 2]), 16_000);
+  await clients[0].options.onTranslatedAudio(Buffer.from([3, 4]).toString("base64"));
+  await bridge.handoff({ id: "ko-1", language: "ko" });
+
+  assert.deepEqual(calls, [
+    "sink:ko",
+    "activity-start",
+    "subscribe:original:ja-1",
+    "capture",
+    "activity-end",
+    "unsubscribe:original:ja-1",
+    "gemini-close",
+    "sink:ja",
+    "activity-start",
+    "subscribe:original:ko-1",
+  ]);
+  assert.equal(clients.length, 2);
+  await bridge.abort();
+});
+
 test("a second start is rejected while Gemini setup is still pending", async () => {
   const setupCallbacks = [];
   const clients = [];
