@@ -231,6 +231,81 @@ test("a failed pending-focus bridge start stays locked out until that utterance 
   assert.deepEqual(starts.at(-1), { participantId: second.id, utteranceId: "utterance-3" });
 });
 
+test("a failed immediate handoff locks the target utterance out across refreshes", async () => {
+  let now = 0;
+  let participantSequence = 0;
+  let utteranceSequence = 0;
+  let failHandoff = true;
+  const bridgeEvents = [];
+  const events = [];
+  const { service } = createService({
+    clock: () => now,
+    minimumFocusHoldMilliseconds: 0,
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    utteranceIdFactory: () => `utterance-${++utteranceSequence}`,
+    eventRecorder: { record(event) { events.push(event); } },
+    translationBridge: {
+      async start(participant, utterance) {
+        bridgeEvents.push({ type: "start", participantId: participant.id, utteranceId: utterance.utteranceId });
+      },
+      async stop() {},
+      async handoff(participant, transition) {
+        bridgeEvents.push({ type: "handoff", participantId: participant.id, utteranceId: transition.utteranceId });
+        if (failHandoff) throw new Error("setup retry exhausted");
+      },
+    },
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "Sora", language: "ja" })).participant;
+  const listener = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 0 });
+  now = 100;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 100 });
+  now = 200;
+  await assert.rejects(
+    service.speechActivity({ participantId: first.id, type: "speech-end", observedAt: 200 }),
+    /setup retry exhausted/,
+  );
+
+  now = 300;
+  assert.equal((await service.refresh()).translationFocusId, null);
+  now = 400;
+  assert.equal((await service.refresh()).translationFocusId, null);
+  assert.deepEqual(bridgeEvents, [
+    { type: "start", participantId: first.id, utteranceId: "utterance-1" },
+    { type: "handoff", participantId: second.id, utteranceId: "utterance-2" },
+  ]);
+  assert.deepEqual(
+    events.filter(({ errorCode }) => errorCode === "translation-recovery-unavailable")
+      .map(({ type, participantId, utteranceId, errorCode }) => ({
+        type, participantId, utteranceId, errorCode,
+      })),
+    [{
+      type: "utterance-aborted",
+      participantId: second.id,
+      utteranceId: "utterance-2",
+      errorCode: "translation-recovery-unavailable",
+    }],
+  );
+  const listenerState = service.snapshot().participants.find(({ id }) => id === listener.id);
+  assert.equal(listenerState.audio.mode, "focus-pending");
+  assert.deepEqual(listenerState.audio.tracks.map(({ trackId, role, gain }) => ({ trackId, role, gain })), [
+    { trackId: `original:${second.id}`, role: "background", gain: 0.2 },
+  ]);
+
+  await service.speechActivity({ participantId: second.id, type: "speech-end", observedAt: 400 });
+  failHandoff = false;
+  now = 500;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 500 });
+  assert.deepEqual(bridgeEvents.at(-1), {
+    type: "start",
+    participantId: second.id,
+    utteranceId: "utterance-3",
+  });
+});
+
 test("dynamic participant joins with a generated id and can leave", async () => {
   const { service } = createService();
 
