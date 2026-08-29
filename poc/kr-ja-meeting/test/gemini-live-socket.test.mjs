@@ -74,6 +74,23 @@ test("closure is surfaced for bridge-level fresh-session recovery", () => {
   assert.deepEqual(closed, { code: 1011, reason: "provider unavailable" });
 });
 
+test("goAway remaining time is surfaced in milliseconds before provider closure", () => {
+  const events = [];
+  const socket = new FakeSocket("unused");
+  const client = new GeminiLiveTranslateSocket({
+    apiKey: "test-only-key",
+    meetingId: "meeting-1",
+    targetLanguage: "ja",
+    socketFactory: () => socket,
+    onServerEvent(event) { events.push(event); },
+  });
+  client.connect();
+  socket.emit("open");
+  socket.emit("message", JSON.stringify({ goAway: { timeLeft: "0.45s" } }));
+
+  assert.deepEqual(events, [{ goAway: true, timeLeftMilliseconds: 450 }]);
+});
+
 test("events from a closed socket cannot contaminate a fresh connection", () => {
   const sockets = [];
   const audio = [];

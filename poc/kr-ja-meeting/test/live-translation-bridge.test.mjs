@@ -461,6 +461,72 @@ test("provider replacement fences stale output, buffers only two seconds, and co
   await bridge.abort();
 });
 
+test("a 60-minute goAway path replaces proactively with at most a 500ms measured gap", async () => {
+  const clients = [];
+  const captured = [];
+  const sent = [];
+  const availability = [];
+  const events = [];
+  let originalFrame;
+  let now = 0;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    clock: () => now,
+    onTranslationAvailability(value) { availability.push(value); },
+    eventRecorder: { record(event) { events.push(event); } },
+    audioGateway: {
+      async translationSink() {
+        return { async capture(pcm) { captured.push(pcm.readInt16LE(0)); } };
+      },
+      async subscribeOriginal(_trackName, onFrame) {
+        originalFrame = onFrame;
+        return { async close() {} };
+      },
+    },
+    geminiFactory(options) {
+      const index = clients.length;
+      const client = {
+        closed: false,
+        connect() { if (index === 0) options.onSetupComplete(); },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16(pcm) { sent.push({ client: index, marker: pcm.readInt16LE(0) }); return true; },
+        close() { this.closed = true; },
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  now = 3_599_600;
+  clients[0].options.onServerEvent({ goAway: true, timeLeftMilliseconds: 400 });
+  await waitUntil(() => clients.length === 2);
+  assert.equal(clients[0].client.closed, false);
+
+  for (let marker = 1; marker <= 25; marker += 1) {
+    const frame = Buffer.alloc(3_200);
+    frame.writeInt16LE(marker);
+    originalFrame(frame, 16_000);
+  }
+  await clients[0].options.onTranslatedAudio(Buffer.from([99, 0]).toString("base64"));
+  assert.deepEqual(captured, []);
+
+  now = 3_600_000;
+  clients[1].options.onSetupComplete();
+  await waitUntil(() => availability.at(-1) === "available");
+
+  assert.equal(clients[0].client.closed, true);
+  assert.deepEqual(sent.filter(({ client }) => client === 1).map(({ marker }) => marker),
+    [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+  const replacement = events.find(({ type, reconnectReason }) =>
+    type === "gemini-retry-succeeded" && reconnectReason === "go-away-time-left");
+  assert.equal(replacement.interruptionMilliseconds, 400);
+  assert.equal(replacement.interruptionMilliseconds <= 500, true);
+  assert.deepEqual(availability, ["reconnecting", "available"]);
+  await bridge.abort();
+});
+
 test("stop closes Gemini and permits restart even when subscription cleanup fails", async () => {
   const clients = [];
   let subscriptionCount = 0;

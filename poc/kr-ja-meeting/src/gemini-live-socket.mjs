@@ -173,7 +173,13 @@ export class GeminiLiveTranslateSocket {
     }
     if (message.serverContent?.turnComplete) serverEvent.turnComplete = true;
     if (message.serverContent?.interrupted) serverEvent.interrupted = true;
-    if (message.goAway) serverEvent.goAway = true;
+    if (message.goAway) {
+      serverEvent.goAway = true;
+      const timeLeftMilliseconds = durationMilliseconds(message.goAway.timeLeft);
+      if (timeLeftMilliseconds !== null) {
+        serverEvent.timeLeftMilliseconds = timeLeftMilliseconds;
+      }
+    }
     if (Object.keys(serverEvent).length > 0) this.#onServerEvent(serverEvent);
     if (message.setupComplete) {
       this.#setupComplete = true;
@@ -217,4 +223,10 @@ export class GeminiLiveTranslateSocket {
     return true;
   }
 
+}
+
+function durationMilliseconds(value) {
+  if (typeof value !== "string" || !/^\d+(?:\.\d+)?s$/.test(value)) return null;
+  const milliseconds = Number.parseFloat(value.slice(0, -1)) * 1_000;
+  return Number.isFinite(milliseconds) ? milliseconds : null;
 }

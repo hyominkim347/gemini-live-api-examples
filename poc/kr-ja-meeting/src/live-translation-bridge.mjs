@@ -228,6 +228,13 @@ export class LiveTranslationBridge {
             if (!state.setupComplete) setup.reject(error);
             else void recoverProvider();
           },
+          onServerEvent(event) {
+            if (!event?.goAway) return;
+            void recoverProvider({
+              proactive: true,
+              timeLeftMilliseconds: event.timeLeftMilliseconds,
+            });
+          },
           onTranslatedAudio: (base64Audio) => captureTranslatedAudio(base64Audio, generation),
         });
         state.client = client;
@@ -257,14 +264,24 @@ export class LiveTranslationBridge {
         }
         throw lastError;
       };
-      const recoverProvider = async () => {
+      const recoverProvider = async ({ proactive = false, timeLeftMilliseconds } = {}) => {
         if (recovering || !acceptingInput || !active) return;
         recovering = true;
-        providerState.intentional = true;
-        providerState.client.close();
+        const previousProvider = providerState;
+        if (!proactive) {
+          previousProvider.intentional = true;
+          previousProvider.client.close();
+        }
         outputGeneration += 1;
+        const replacementStartedAt = this.#clock();
+        const reconnectReason = proactive
+          ? (Number.isFinite(timeLeftMilliseconds) ? "go-away-time-left" : "go-away")
+          : "provider-closed";
         notifyAvailability("reconnecting");
-        this.#record("gemini-retry-started", context, { result: "started" });
+        this.#record("gemini-retry-started", context, {
+          result: "started",
+          reconnectReason,
+        });
         try {
           const next = await replaceWithFastRetries();
           if (!acceptingInput || this.#active !== active) {
@@ -272,6 +289,8 @@ export class LiveTranslationBridge {
             next.client.close();
             return;
           }
+          previousProvider.intentional = true;
+          previousProvider.client.close();
           providerState = next;
           gemini = next.client;
           active.gemini = gemini;
@@ -279,8 +298,14 @@ export class LiveTranslationBridge {
             gemini.sendPcm16(frame.pcm, frame.sampleRate);
           }
           notifyAvailability("available");
-          this.#record("gemini-retry-succeeded", context, { result: "succeeded" });
+          this.#record("gemini-retry-succeeded", context, {
+            result: "succeeded",
+            reconnectReason,
+            interruptionMilliseconds: Math.max(0, this.#clock() - replacementStartedAt),
+          });
         } catch {
+          previousProvider.intentional = true;
+          previousProvider.client.close();
           notifyAvailability("unavailable");
           this.#record("gemini-retry-failed", context, {
             result: "unavailable",
