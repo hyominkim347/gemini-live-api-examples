@@ -11,7 +11,7 @@ export class SpeechActivityDetector {
   constructor({
     onEvent,
     speechThreshold = 0.05,
-    silenceMilliseconds = 600,
+    silenceMilliseconds = 1_800,
     minimumUtteranceSpanMilliseconds = 1_800,
     shortUtteranceSilenceMilliseconds = 1_800,
   }) {

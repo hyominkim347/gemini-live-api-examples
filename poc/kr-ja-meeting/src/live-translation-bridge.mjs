@@ -14,7 +14,7 @@ export class LiveTranslationBridge {
     meetingId,
     audioGateway,
     geminiFactory,
-    drainQuietMilliseconds = 750,
+    drainQuietMilliseconds = 1_500,
     firstAudioTimeoutMilliseconds = 5_000,
     eventRecorder = { record() {} },
   }) {
@@ -55,6 +55,7 @@ export class LiveTranslationBridge {
     let acceptingInput = true;
     let inputRecorded = false;
     let outputRecorded = false;
+    let outputCompleted = false;
     let setupSucceeded = false;
     let audioDrainGeneration = 0;
     const drainQuietMilliseconds = this.#drainQuietMilliseconds;
@@ -77,6 +78,8 @@ export class LiveTranslationBridge {
         utteranceId,
         eventRecorder: this.#eventRecorder,
         onSetupComplete: setup.resolve,
+        onGenerationComplete() { outputCompleted = true; },
+        onTurnComplete() { outputCompleted = true; },
         onClose() { setup.reject(new Error("Gemini closed during setup")); },
         onError: setup.reject,
         onTranslatedAudio: (base64Audio) => {
@@ -137,11 +140,15 @@ export class LiveTranslationBridge {
         gemini,
         originalSubscription,
         capture: () => captureChain,
+        waitForPlayout: typeof sink.waitForPlayout === "function"
+          ? () => sink.waitForPlayout()
+          : async () => {},
         pauseInput() { acceptingInput = false; },
         resumeInput() { acceptingInput = true; },
         resetAudioTurn() {
           audibleInputReceived = false;
           audibleOutputReceived = false;
+          outputCompleted = false;
           lastTranslatedAudioAt = 0;
         },
         hasAudibleInput() { return audibleInputReceived; },
@@ -151,6 +158,7 @@ export class LiveTranslationBridge {
           while (true) {
             if (generation !== audioDrainGeneration) return;
             if (audibleOutputReceived) {
+              if (outputCompleted) return;
               const quietFrom = Math.max(startedAt, lastTranslatedAudioAt);
               const remaining = drainQuietMilliseconds - (Date.now() - quietFrom);
               if (remaining <= 0) return;
@@ -212,6 +220,12 @@ export class LiveTranslationBridge {
     const sentActivityEnd = active.gemini.sendActivityEnd();
     const unsubscribe = settle(active.originalSubscription.close());
     const results = [];
+    let geminiClosed = false;
+    const closeGemini = () => {
+      if (geminiClosed) return;
+      geminiClosed = true;
+      active.gemini.close();
+    };
     try {
       results.push(sentActivityEnd
         ? active.hasAudibleInput()
@@ -219,13 +233,15 @@ export class LiveTranslationBridge {
           : { status: "fulfilled", value: undefined }
         : { status: "rejected", reason: new Error("Gemini activityEnd was not sent") });
       active.cancelAudioDrain();
+      closeGemini();
       results.push(await settle(active.capture()));
+      results.push(await settle(active.waitForPlayout()));
       results.push(await unsubscribe);
     } finally {
-      active.gemini.close();
+      closeGemini();
       this.#active = null;
       const outputSucceeded = active.hasAudibleInput()
-        && results.slice(0, 2).every(({ status }) => status === "fulfilled");
+        && results.slice(0, 3).every(({ status }) => status === "fulfilled");
       this.#record(
         outputSucceeded ? "gemini-output-completed" : "gemini-output-aborted",
         active.context,

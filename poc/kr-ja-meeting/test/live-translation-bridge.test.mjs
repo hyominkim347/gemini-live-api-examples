@@ -63,6 +63,65 @@ test("active original track flows through Gemini into the opposite-language trac
   ]);
 });
 
+test("stop waits for translated audio playout before closing the bridge", async () => {
+  const playout = deferredForBridgeTest();
+  const captured = [];
+  let originalFrame;
+  let geminiOptions;
+  let geminiClosed = false;
+  let playoutStarted = false;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    drainQuietMilliseconds: 1_000,
+    audioGateway: {
+      async translationSink() {
+        return {
+          async capture(buffer) { captured.push(buffer.toString("hex")); },
+          async waitForPlayout() {
+            playoutStarted = true;
+            await playout.promise;
+          },
+        };
+      },
+      async subscribeOriginal(_trackName, onFrame) {
+        originalFrame = onFrame;
+        return { async close() {} };
+      },
+    },
+    geminiFactory(options) {
+      geminiOptions = options;
+      return {
+        connect() { options.onSetupComplete(); },
+        sendActivityStart() { return true; },
+        sendActivityEnd() {
+          void options.onTranslatedAudio(Buffer.from([1, 2]).toString("base64"));
+          setTimeout(() => {
+            void options.onTranslatedAudio(Buffer.from([3, 4]).toString("base64"));
+            options.onGenerationComplete();
+          }, 5);
+          return true;
+        },
+        sendPcm16() { return true; },
+        close() { geminiClosed = true; },
+      };
+    },
+  });
+
+  await bridge.start({ id: "ko-1", language: "ko" });
+  originalFrame(Buffer.from([1, 2]), 16_000);
+  const stop = bridge.stop();
+  await delayForTest(40);
+
+  assert.equal(playoutStarted, true);
+  assert.equal(geminiClosed, true);
+  assert.deepEqual(captured, ["0102", "0304"]);
+
+  playout.resolve();
+  await stop;
+  assert.equal(geminiClosed, true);
+  assert.equal(geminiOptions.targetLanguage, "ja");
+});
+
 test("a second speaker cannot overlap the active translation bridge", async () => {
   let geminiOptions;
   const bridge = new LiveTranslationBridge({

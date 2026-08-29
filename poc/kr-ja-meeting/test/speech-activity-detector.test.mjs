@@ -39,14 +39,15 @@ test("brief speech and a short pause stay in one utterance when speech resumes",
   detector.observe(0.08, 2_300);
   detector.observe(0.09, 2_900);
   detector.observe(0.01, 3_500);
+  detector.observe(0.01, 4_700);
 
   assert.deepEqual(events, [
     { type: "speech-start", observedAt: 100 },
-    { type: "speech-end", observedAt: 3_500 },
+    { type: "speech-end", observedAt: 4_700 },
   ]);
 });
 
-test("a long utterance keeps the regular silence boundary by default", () => {
+test("a long utterance stays open across a natural pause when speech resumes", () => {
   const events = [];
   const detector = new SpeechActivityDetector({
     onEvent: (event) => events.push(event),
@@ -54,12 +55,15 @@ test("a long utterance keeps the regular silence boundary by default", () => {
 
   detector.observe(0.08, 100);
   detector.observe(0.09, 1_900);
-  detector.observe(0.01, 2_499);
-  detector.observe(0.01, 2_500);
+  detector.observe(0.01, 2_600);
+  detector.observe(0.08, 2_700);
+  detector.observe(0.09, 3_500);
+  detector.observe(0.01, 5_299);
+  detector.observe(0.01, 5_300);
 
   assert.deepEqual(events, [
     { type: "speech-start", observedAt: 100 },
-    { type: "speech-end", observedAt: 2_500 },
+    { type: "speech-end", observedAt: 5_300 },
   ]);
 });
 
