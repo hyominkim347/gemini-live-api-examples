@@ -18,9 +18,10 @@ export class LiveTranslationBridge {
   #eventRecorder;
   #preparedInputs = new Map();
   #active = null;
-  #startingClient = null;
+  #startingProviderState = null;
   #startPromise = null;
   #abortRevision = 0;
+  #translationAvailability = "available";
 
   constructor({
     meetingId,
@@ -167,13 +168,6 @@ export class LiveTranslationBridge {
       let recovering = false;
       let recoveryTimer = null;
       const recoveryBuffer = createDurationBuffer(this.#replacementBufferMilliseconds);
-      const notifyAvailability = (availability) => {
-        try {
-          void Promise.resolve(this.#onTranslationAvailability(availability)).catch(() => {});
-        } catch {
-          // Meeting state reporting cannot break provider recovery.
-        }
-      };
       const captureTranslatedAudio = (base64Audio, generation) => {
         if (!acceptingOutput || generation !== outputGeneration) return Promise.resolve();
         const pcm = Buffer.from(base64Audio, "base64");
@@ -198,54 +192,72 @@ export class LiveTranslationBridge {
         });
         return captureChain;
       };
+      let recoveryPromise = null;
+      let recoveryRevision = 0;
       const connectFresh = async () => {
         const setup = deferred();
-        const state = { intentional: false, setupComplete: false, client: null };
+        void setup.promise.catch(() => {});
+        const state = {
+          intentional: false,
+          setupComplete: false,
+          cancelled: false,
+          client: null,
+          cancel() {
+            if (state.cancelled) return;
+            state.cancelled = true;
+            state.intentional = true;
+            setup.reject(providerRecoveryCancelled());
+            state.client?.close();
+          },
+        };
         const generation = ++outputGeneration;
-        const client = this.#geminiFactory({
-          meetingId: this.#meetingId,
-          targetLanguage,
-          participantId: speaker.id,
-          utteranceId: context.utteranceId,
-          eventRecorder: this.#eventRecorder,
-          onSetupComplete() {
-            state.setupComplete = true;
-            setup.resolve();
-          },
-          onGenerationComplete() {
-            if (generation === outputGeneration) outputCompleted = true;
-          },
-          onTurnComplete() {
-            if (generation === outputGeneration) outputCompleted = true;
-          },
-          onClose() {
-            if (state.intentional) return;
-            if (!state.setupComplete) setup.reject(new Error("Gemini closed during setup"));
-            else void recoverProvider();
-          },
-          onError(error) {
-            if (state.intentional) return;
-            if (!state.setupComplete) setup.reject(error);
-            else void recoverProvider();
-          },
-          onServerEvent(event) {
-            if (!event?.goAway) return;
-            void recoverProvider({
-              proactive: true,
-              timeLeftMilliseconds: event.timeLeftMilliseconds,
-            });
-          },
-          onTranslatedAudio: (base64Audio) => captureTranslatedAudio(base64Audio, generation),
-        });
-        state.client = client;
-        this.#startingClient = client;
-        client.connect();
         try {
+          const client = this.#geminiFactory({
+            meetingId: this.#meetingId,
+            targetLanguage,
+            participantId: speaker.id,
+            utteranceId: context.utteranceId,
+            eventRecorder: this.#eventRecorder,
+            onSetupComplete() {
+              if (state.cancelled) return;
+              state.setupComplete = true;
+              setup.resolve();
+            },
+            onGenerationComplete() {
+              if (generation === outputGeneration) outputCompleted = true;
+            },
+            onTurnComplete() {
+              if (generation === outputGeneration) outputCompleted = true;
+            },
+            onClose() {
+              if (state.intentional) return;
+              if (!state.setupComplete) setup.reject(new Error("Gemini closed during setup"));
+              else void recoverProvider();
+            },
+            onError(error) {
+              if (state.intentional) return;
+              if (!state.setupComplete) setup.reject(error);
+              else void recoverProvider();
+            },
+            onServerEvent(event) {
+              if (!event?.goAway) return;
+              void recoverProvider({
+                proactive: true,
+                timeLeftMilliseconds: event.timeLeftMilliseconds,
+              });
+            },
+            onTranslatedAudio: (base64Audio) => captureTranslatedAudio(base64Audio, generation),
+          });
+          state.client = client;
+          this.#startingProviderState = state;
+          client.connect();
           await withTimeout(setup.promise, "Gemini setup", 20_000);
         } catch (error) {
           state.intentional = true;
-          client.close();
+          state.client?.close();
           throw error;
+        } finally {
+          if (this.#startingProviderState === state) this.#startingProviderState = null;
         }
         return state;
       };
@@ -255,6 +267,7 @@ export class LiveTranslationBridge {
           try {
             return await connectFresh();
           } catch (error) {
+            if (isProviderRecoveryCancelled(error)) throw error;
             lastError = error;
             this.#record("gemini-retry-failed", context, {
               result: "failed",
@@ -264,65 +277,81 @@ export class LiveTranslationBridge {
         }
         throw lastError;
       };
-      const recoverProvider = async ({ proactive = false, timeLeftMilliseconds } = {}) => {
+      const recoverProvider = ({ proactive = false, timeLeftMilliseconds } = {}) => {
         if (recovering || !acceptingInput || !active) return;
         recovering = true;
-        const previousProvider = providerState;
-        if (!proactive) {
-          previousProvider.intentional = true;
-          previousProvider.client.close();
-        }
-        outputGeneration += 1;
-        const replacementStartedAt = this.#clock();
-        const reconnectReason = proactive
-          ? (Number.isFinite(timeLeftMilliseconds) ? "go-away-time-left" : "go-away")
-          : "provider-closed";
-        notifyAvailability("reconnecting");
-        this.#record("gemini-retry-started", context, {
-          result: "started",
-          reconnectReason,
-        });
-        try {
-          const next = await replaceWithFastRetries();
-          if (!acceptingInput || this.#active !== active) {
-            next.intentional = true;
-            next.client.close();
-            return;
+        const revision = ++recoveryRevision;
+        recoveryPromise = (async () => {
+          const previousProvider = providerState;
+          if (!proactive) {
+            previousProvider.intentional = true;
+            previousProvider.client.close();
           }
-          previousProvider.intentional = true;
-          previousProvider.client.close();
-          providerState = next;
-          gemini = next.client;
-          active.gemini = gemini;
-          for (const frame of recoveryBuffer.take()) {
-            gemini.sendPcm16(frame.pcm, frame.sampleRate);
-          }
-          notifyAvailability("available");
-          this.#record("gemini-retry-succeeded", context, {
-            result: "succeeded",
+          outputGeneration += 1;
+          const replacementStartedAt = this.#clock();
+          const reconnectReason = proactive
+            ? (Number.isFinite(timeLeftMilliseconds) ? "go-away-time-left" : "go-away")
+            : "provider-closed";
+          this.#publishAvailability("reconnecting");
+          this.#record("gemini-retry-started", context, {
+            result: "started",
             reconnectReason,
-            interruptionMilliseconds: Math.max(0, this.#clock() - replacementStartedAt),
           });
-        } catch {
-          previousProvider.intentional = true;
-          previousProvider.client.close();
-          notifyAvailability("unavailable");
-          this.#record("gemini-retry-failed", context, {
-            result: "unavailable",
-            errorCode: "recovery-cooldown",
-          });
-          recoveryTimer = this.#scheduleRecovery(() => {
-            recoveryTimer = null;
-            recovering = false;
-            void recoverProvider();
-          }, this.#recoveryCooldownMilliseconds);
-        } finally {
-          if (!recoveryTimer) recovering = false;
-        }
+          try {
+            await captureChain;
+            if (revision !== recoveryRevision || !acceptingInput || this.#active !== active) {
+              throw providerRecoveryCancelled();
+            }
+            if (typeof sink.clearQueue !== "function") {
+              throw new Error("translation sink clearQueue is required for provider recovery");
+            }
+            sink.clearQueue();
+            const next = await replaceWithFastRetries();
+            if (revision !== recoveryRevision || !acceptingInput || this.#active !== active) {
+              next.cancel();
+              throw providerRecoveryCancelled();
+            }
+            previousProvider.intentional = true;
+            previousProvider.client.close();
+            providerState = next;
+            gemini = next.client;
+            active.gemini = gemini;
+            for (const frame of recoveryBuffer.take()) {
+              gemini.sendPcm16(frame.pcm, frame.sampleRate);
+            }
+            this.#publishAvailability("available");
+            this.#record("gemini-retry-succeeded", context, {
+              result: "succeeded",
+              reconnectReason,
+              interruptionMilliseconds: Math.max(0, this.#clock() - replacementStartedAt),
+            });
+          } catch (error) {
+            if (isProviderRecoveryCancelled(error)
+              || revision !== recoveryRevision
+              || !acceptingInput
+              || this.#active !== active) return;
+            previousProvider.intentional = true;
+            previousProvider.client.close();
+            this.#publishAvailability("unavailable");
+            this.#record("gemini-retry-failed", context, {
+              result: "unavailable",
+              errorCode: "recovery-cooldown",
+            });
+            recoveryTimer = this.#scheduleRecovery(() => {
+              recoveryTimer = null;
+              recovering = false;
+              void recoverProvider();
+            }, this.#recoveryCooldownMilliseconds);
+          } finally {
+            if (!recoveryTimer) recovering = false;
+          }
+        })();
+        return recoveryPromise;
       };
 
       providerState = await replaceWithFastRetries();
       gemini = providerState.client;
+      this.#publishAvailability("available");
       this.#record("gemini-setup-succeeded", context, { result: "succeeded" });
       setupSucceeded = true;
       this.#throwIfAborted(startRevision);
@@ -396,11 +425,17 @@ export class LiveTranslationBridge {
           }
         },
         cancelAudioDrain() { audioDrainGeneration += 1; },
-        closeProvider: () => {
+        cancelRecovery: async () => {
+          recoveryRevision += 1;
           if (recoveryTimer) {
             this.#cancelRecovery(recoveryTimer);
             recoveryTimer = null;
           }
+          this.#startingProviderState?.cancel();
+          if (recoveryPromise) await settle(recoveryPromise);
+          recovering = false;
+        },
+        closeProvider: () => {
           providerState.intentional = true;
           providerState.client.close();
         },
@@ -422,8 +457,6 @@ export class LiveTranslationBridge {
       if (!alreadyPrepared) await settle(this.release(speaker.id));
       this.#record("resources-closed", context, { result: "closed" });
       throw error;
-    } finally {
-      this.#startingClient = null;
     }
   }
 
@@ -476,9 +509,10 @@ export class LiveTranslationBridge {
       : active.gemini.sendActivityEnd();
     const results = [];
     let geminiClosed = false;
-    const closeGemini = () => {
+    const closeGemini = async () => {
       if (geminiClosed) return;
       geminiClosed = true;
+      await active.cancelRecovery();
       active.closeProvider();
     };
     try {
@@ -492,11 +526,11 @@ export class LiveTranslationBridge {
             : "Gemini activityEnd was not sent",
         ) });
       active.cancelAudioDrain();
-      closeGemini();
+      await closeGemini();
       results.push(await settle(active.capture()));
       results.push(await settle(active.waitForPlayout()));
     } finally {
-      closeGemini();
+      await closeGemini();
       this.#active = null;
       const outputSucceeded = active.hasAudibleInput()
         && results.slice(0, 3).every(({ status }) => status === "fulfilled");
@@ -523,6 +557,7 @@ export class LiveTranslationBridge {
     active.detachInput();
     active.cancelAudioDrain();
     const queueDurationMs = active.interruptOutput();
+    await active.cancelRecovery();
     active.closeProvider();
     const interruptionMilliseconds = Math.max(0, this.#clock() - interruptedAt);
     this.#record("translation-interrupted", active.context, {
@@ -548,7 +583,7 @@ export class LiveTranslationBridge {
   async abort() {
     this.#abortRevision += 1;
     const startPromise = this.#startPromise;
-    if (this.#startingClient) this.#startingClient.close();
+    this.#startingProviderState?.cancel();
     if (startPromise) await settle(startPromise);
     const result = await settle(this.#abortActive());
     const releases = await Promise.all(
@@ -567,6 +602,7 @@ export class LiveTranslationBridge {
     active.detachInput();
     active.cancelAudioDrain();
     const results = await Promise.all([settle(active.capture())]);
+    await active.cancelRecovery();
     active.closeProvider();
     this.#record("gemini-output-aborted", active.context, {
       result: "aborted",
@@ -589,6 +625,16 @@ export class LiveTranslationBridge {
     }
   }
 
+  #publishAvailability(availability) {
+    if (availability === this.#translationAvailability) return;
+    this.#translationAvailability = availability;
+    try {
+      void Promise.resolve(this.#onTranslationAvailability(availability)).catch(() => {});
+    } catch {
+      // Meeting state reporting cannot break provider recovery.
+    }
+  }
+
   #record(type, context, fields) {
     try {
       this.#eventRecorder.record({ type, ...context, ...fields });
@@ -596,6 +642,16 @@ export class LiveTranslationBridge {
       // Observability hooks cannot change translation.
     }
   }
+}
+
+function providerRecoveryCancelled() {
+  const error = new Error("provider recovery cancelled");
+  error.code = "PROVIDER_RECOVERY_CANCELLED";
+  return error;
+}
+
+function isProviderRecoveryCancelled(error) {
+  return error?.code === "PROVIDER_RECOVERY_CANCELLED";
 }
 
 function createPreparedInput(speaker, preRollMilliseconds) {

@@ -394,6 +394,169 @@ test("Gemini is closed when setup fails", async () => {
   assert.equal(closed, true);
 });
 
+test("a synchronous Gemini connect failure is closed intentionally without starting recovery", async () => {
+  let closed = 0;
+  let factoryCalls = 0;
+  const availability = [];
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    fastRecoveryAttempts: 1,
+    onTranslationAvailability(value) { availability.push(value); },
+    audioGateway: {
+      async translationSink() { return { async capture() {} }; },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      factoryCalls += 1;
+      return {
+        connect() {
+          options.onClose();
+          throw new Error("connect threw synchronously");
+        },
+        close() { closed += 1; },
+      };
+    },
+  });
+
+  await assert.rejects(
+    bridge.start({ id: "ja-1", language: "ja" }),
+    /connect threw synchronously/,
+  );
+  assert.equal(factoryCalls, 1);
+  assert.equal(closed, 1);
+  assert.deepEqual(availability, []);
+});
+
+test("recovery waits for an in-flight stale capture and clears it before accepting replacement output", async () => {
+  const clients = [];
+  const queued = [];
+  const captureEntered = deferredForBridgeTest();
+  const releaseCapture = deferredForBridgeTest();
+  let clearCalls = 0;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    audioGateway: {
+      async translationSink() {
+        return {
+          async capture(pcm) {
+            captureEntered.resolve();
+            await releaseCapture.promise;
+            queued.push(pcm.readInt16LE(0));
+          },
+          clearQueue() { clearCalls += 1; queued.length = 0; },
+        };
+      },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      const client = {
+        connect() { options.onSetupComplete(); },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16() { return true; },
+        close() {},
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  const staleCapture = clients[0].options.onTranslatedAudio(Buffer.from([7, 0]).toString("base64"));
+  await captureEntered.promise;
+  clients[0].options.onError(new Error("provider disconnected"));
+  await Promise.resolve();
+  assert.equal(clients.length, 1);
+  releaseCapture.resolve();
+  await staleCapture;
+  await waitUntil(() => clients.length === 2);
+  await waitUntil(() => clearCalls === 1);
+  await clients[1].options.onTranslatedAudio(Buffer.from([8, 0]).toString("base64"));
+
+  assert.deepEqual(queued, [8]);
+  await bridge.abort();
+});
+
+test("abort cancels and awaits a pending recovery replacement without orphan retries", async () => {
+  const clients = [];
+  const availability = [];
+  const scheduled = [];
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    onTranslationAvailability(value) { availability.push(value); },
+    scheduleRecovery(callback) { scheduled.push(callback); return scheduled.length; },
+    cancelRecovery() {},
+    audioGateway: {
+      async translationSink() { return { async capture() {}, clearQueue() {} }; },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      const index = clients.length;
+      const client = {
+        closed: false,
+        connect() { if (index === 0) options.onSetupComplete(); },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16() { return true; },
+        close() { this.closed = true; options.onClose(); },
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  clients[0].options.onError(new Error("provider disconnected"));
+  await waitUntil(() => clients.length === 2);
+  await bridge.abort();
+  await Promise.resolve();
+
+  assert.equal(clients[1].client.closed, true);
+  assert.equal(clients.length, 2);
+  assert.equal(scheduled.length, 0);
+  assert.deepEqual(availability, ["reconnecting"]);
+});
+
+test("a fresh start publishes available after an unavailable recovery was aborted", async () => {
+  const clients = [];
+  const availability = [];
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    fastRecoveryAttempts: 1,
+    onTranslationAvailability(value) { availability.push(value); },
+    scheduleRecovery() { return 1; },
+    cancelRecovery() {},
+    audioGateway: {
+      async translationSink() { return { async capture() {}, clearQueue() {} }; },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      const index = clients.length;
+      const client = {
+        connect() {
+          if (index === 0 || index === 2) options.onSetupComplete();
+          else options.onError(new Error("replacement failed"));
+        },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16() { return true; },
+        close() {},
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  clients[0].options.onError(new Error("provider disconnected"));
+  await waitUntil(() => availability.at(-1) === "unavailable");
+  await bridge.abort();
+  await bridge.start({ id: "ja-1", language: "ja" });
+
+  assert.deepEqual(availability, ["reconnecting", "unavailable", "available"]);
+  await bridge.abort();
+});
+
 test("provider replacement fences stale output, buffers only two seconds, and cools down after three retries", async () => {
   const clients = [];
   const sent = [];
@@ -415,7 +578,7 @@ test("provider replacement fences stale output, buffers only two seconds, and co
     onTranslationAvailability(value) { availability.push(value); },
     audioGateway: {
       async translationSink() {
-        return { async capture(pcm) { captured.push(pcm.readInt16LE(0)); } };
+        return { async capture(pcm) { captured.push(pcm.readInt16LE(0)); }, clearQueue() {} };
       },
       async subscribeOriginal(_trackName, onFrame) {
         originalFrame = onFrame;
@@ -477,7 +640,7 @@ test("a 60-minute goAway path replaces proactively with at most a 500ms measured
     eventRecorder: { record(event) { events.push(event); } },
     audioGateway: {
       async translationSink() {
-        return { async capture(pcm) { captured.push(pcm.readInt16LE(0)); } };
+        return { async capture(pcm) { captured.push(pcm.readInt16LE(0)); }, clearQueue() {} };
       },
       async subscribeOriginal(_trackName, onFrame) {
         originalFrame = onFrame;

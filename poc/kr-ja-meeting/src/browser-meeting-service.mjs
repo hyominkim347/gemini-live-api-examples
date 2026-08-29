@@ -155,9 +155,11 @@ export class BrowserMeetingService {
           if (!previousFocusId && focus.translationFocusId) {
             const focusedParticipant = this.#session.participant(focus.translationFocusId);
             const nextUtteranceId = this.#utteranceIdFor(focus.translationFocusId);
-            if (this.#parkedTranslation) {
+            const parkedTranslation = this.#parkedTranslation;
+            this.#parkedTranslation = null;
+            if (parkedTranslation) {
               if (
-                this.#parkedTranslation.participantId === focusedParticipant.id
+                parkedTranslation.participantId === focusedParticipant.id
                 && typeof this.#translationBridge.resume === "function"
               ) {
                 await this.#translationBridge.resume(focusedParticipant, {
@@ -166,12 +168,11 @@ export class BrowserMeetingService {
                 });
               } else {
                 await this.#translationBridge.handoff(focusedParticipant, {
-                  previousUtteranceId: this.#parkedTranslation.utteranceId,
+                  previousUtteranceId: parkedTranslation.utteranceId,
                   utteranceId: nextUtteranceId,
                   observedAt: eventAt,
                 });
               }
-              this.#parkedTranslation = null;
             } else {
               await this.#translationBridge.start(focusedParticipant, {
                 utteranceId: nextUtteranceId,
@@ -235,13 +236,14 @@ export class BrowserMeetingService {
           return this.snapshot();
         }
         try {
-          if (this.#parkedTranslation) {
+          const parkedTranslation = this.#parkedTranslation;
+          this.#parkedTranslation = null;
+          if (parkedTranslation) {
             await this.#translationBridge.handoff(participant, {
-              previousUtteranceId: this.#parkedTranslation.utteranceId,
+              previousUtteranceId: parkedTranslation.utteranceId,
               utteranceId,
               observedAt: eventAt,
             });
-            this.#parkedTranslation = null;
           } else {
             await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
           }
@@ -308,12 +310,12 @@ export class BrowserMeetingService {
   }
 
   translationAvailability(availability) {
+    const changed = this.#session.setTranslationAvailability(availability);
+    if (changed) this.#translationAvailabilityChangedAt = this.#eventTimestamp();
+    const sessionSnapshot = this.#session.snapshot();
+    const utteranceId = this.#session.activeUtteranceId ?? undefined;
     return this.#enqueue(async () => {
-      const changed = this.#session.setTranslationAvailability(availability);
-      if (changed) {
-        this.#translationAvailabilityChangedAt = this.#eventTimestamp();
-        this.#recordListeningPlans();
-      }
+      if (changed) this.#recordListeningPlans(sessionSnapshot, utteranceId);
       return this.snapshot();
     });
   }
@@ -441,9 +443,11 @@ export class BrowserMeetingService {
     this.#recordListeningPlans();
   }
 
-  #recordListeningPlans() {
-    const utteranceId = this.#session.activeUtteranceId ?? undefined;
-    for (const participant of this.#session.snapshot().participants) {
+  #recordListeningPlans(
+    sessionSnapshot = this.#session.snapshot(),
+    utteranceId = this.#session.activeUtteranceId ?? undefined,
+  ) {
+    for (const participant of sessionSnapshot.participants) {
       const planKey = JSON.stringify(participant.audio);
       if (this.#listeningPlanKeyByParticipantId.get(participant.id) === planKey) continue;
       this.#listeningPlanKeyByParticipantId.set(participant.id, planKey);

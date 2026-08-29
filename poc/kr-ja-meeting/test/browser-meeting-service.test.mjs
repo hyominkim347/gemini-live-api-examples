@@ -591,6 +591,79 @@ test("provider reconnect hook exposes fallback immediately without disconnecting
   assert.equal(recovered.participants.find(({ id }) => id === listener.id).microphone, "unmuted");
 });
 
+test("provider availability state changes immediately while prior actions remain serialized", async () => {
+  let now = 0;
+  const tokenEntered = deferredForServiceTest();
+  const releaseToken = deferredForServiceTest();
+  const { service } = createService({
+    clock: () => now,
+    async tokenIssuer(participant) {
+      tokenEntered.resolve();
+      await releaseToken.promise;
+      return `token:${participant.id}`;
+    },
+  });
+  const joining = service.join({ name: "Yuki", language: "ja" });
+  await tokenEntered.promise;
+  now = 1_000;
+
+  const transition = service.translationAvailability("reconnecting");
+
+  assert.equal(service.snapshot().translationAvailability, "reconnecting");
+  assert.equal(service.snapshot().translationAvailabilityChangedAt, 1_000);
+  releaseToken.resolve();
+  await joining;
+  assert.equal((await transition).translationAvailability, "reconnecting");
+});
+
+test("a destructive parked handoff failure is consumed so the next utterance starts fresh", async () => {
+  let participantSequence = 0;
+  let utteranceSequence = 0;
+  let liveSession = false;
+  let failHandoff = true;
+  const calls = [];
+  const { service } = createService({
+    minimumFocusHoldMilliseconds: 0,
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    utteranceIdFactory: () => `utterance-${++utteranceSequence}`,
+    translationBridge: {
+      async prepare() {},
+      async start(participant, utterance) {
+        calls.push({ type: "start", participantId: participant.id, utteranceId: utterance.utteranceId });
+        liveSession = true;
+      },
+      async phraseBoundary() { calls.push({ type: "boundary" }); },
+      async handoff(participant, utterance) {
+        calls.push({ type: "handoff", participantId: participant.id, utteranceId: utterance.utteranceId });
+        liveSession = false;
+        if (failHandoff) throw new Error("replacement setup failed");
+      },
+      async resume() {
+        calls.push({ type: "resume" });
+        if (!liveSession) throw new Error("cannot resume a closed session");
+      },
+      async stop() { liveSession = false; },
+      async release() {},
+    },
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 0 });
+  await service.speechActivity({ participantId: first.id, type: "speech-end", observedAt: 100 });
+  await assert.rejects(
+    service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 200 }),
+    /replacement setup failed/,
+  );
+
+  failHandoff = false;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 300 });
+
+  assert.equal(liveSession, true);
+  assert.deepEqual(calls.map(({ type }) => type), ["start", "boundary", "handoff", "start"]);
+});
+
 test("the last participant leaving disposes the meeting-only glossary hook", async () => {
   let emptyCalls = 0;
   const { service } = createService({ onMeetingEmpty() { emptyCalls += 1; } });
@@ -598,6 +671,12 @@ test("the last participant leaving disposes the meeting-only glossary hook", asy
   await service.leave(participant.id);
   assert.equal(emptyCalls, 1);
 });
+
+function deferredForServiceTest() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
 
 test("automatic speech keeps its utterance id while a fresh Gemini session replaces setup failure", async () => {
   const sockets = [];
