@@ -9,7 +9,7 @@ Google의 [Live Translate LiveKit 예제](https://github.com/google-gemini/gemin
 - 현재 통역 규칙: 겹침 발화를 막지 않고 하나의 통역 초점을 유지한 뒤 안전하게 넘김
 - 초점 유지 규칙: 첫 화자는 즉시 선택하고, 겹침 후보는 설정된 최소 시간 동안 계속 말한 경우에만 종료된 화자의 다음 초점이 됨
 - 데이터 경계: session resumption handle을 사용하지 않고, 회의 용어집은 메모리에만 두며 빈 회의에서 폐기
-- 미사용: File API, explicit cache, Grounding, 입력·출력 전사, 애플리케이션 음성 로그
+- 제품 경로 미사용: File API, explicit cache, Grounding, 입력·출력 전사, 애플리케이션 음성 로그
 
 ## 로컬 tracer 실행
 
@@ -33,6 +33,7 @@ npm run dev
 
 ```bash
 npm run canary:natural-conversation
+npm run canary:automated-contracts
 ```
 
 전체 결정론적 테스트와 브라우저 canary를 실행하고, 아직 실행하지 않은 증거 경계를 분리한
@@ -44,7 +45,9 @@ npm run canary:final
 
 로컬 LiveKit이 준비된 경우에만 `npm run canary:final -- --include-playout`을 사용합니다.
 실제 Gemini provider는 별도 자격증명 권한이 있는 환경에서만 `--include-provider`로 실행합니다.
-보고서의 `service`, `browser`, `playout`, `provider`, `human`은 서로 대체되지 않습니다.
+보고서의 `service`, `browser`, `interruption`, `reconnect`, `long-session`, `playout`,
+`provider-semantic`, `provider-browser`, `human`은 서로 대체되지 않습니다. 자격증명 gate가
+남으면 `automatedOk=false`이고, 사람 청취는 항상 별도 `not-claimed`로 남습니다.
 자동시험은 사람의 이해도·피로·선호나 정확한 gain 값을 확정하지 않습니다.
 
 브라우저 canary의 합성 track은 오디오 element와 상대 gain 적용만 검사합니다. 실제 Gemini 번역 음질이나 지연을 흉내 내지 않습니다.
@@ -56,9 +59,13 @@ npm run canary:final
 ```bash
 npm install
 npm run canary:provider
+npm run canary:provider-semantic
 ```
 
-이 canary는 합성 일본어 음성을 `original:ja-1`로 게시하고, 번역 bot이 Gemini Live Translate의 한국어 PCM을 `translation:ko`로 다시 게시하는 실제 provider 경로입니다. 연결이 끊기면 resumption handle 없이 새 ZDR 세션을 사용합니다. 성공 출력에는 key, 음성, 전사 내용이 포함되지 않습니다.
+첫 canary는 합성 일본어 음성을 `original:ja-1`로 게시하고 번역 PCM을 `translation:ko`로
+다시 게시하는 실제 provider 경로입니다. semantic canary는 양방향 3개 문장의 input/output
+transcription을 메모리에서만 판정하고 first/last meaning boolean만 출력합니다. 제품 server는
+transcription을 켜지 않습니다. 어떤 canary도 key, 음성, PCM 또는 전사 본문을 증거 파일로 저장하지 않습니다.
 
 ## 실제 어댑터 연결
 

@@ -30,3 +30,13 @@ test("meeting glossary stays in memory and can be disposed", () => {
   glossary.clear();
   assert.equal(glossary.size, 0);
 });
+
+test("transcription is disabled by default and enabled only for an explicit canary setup", () => {
+  const product = buildGeminiSetup({ targetLanguage: "ja" });
+  assert.equal("inputAudioTranscription" in product.setup, false);
+  assert.equal("outputAudioTranscription" in product.setup, false);
+
+  const canary = buildGeminiSetup({ targetLanguage: "ja", canaryTranscription: true });
+  assert.deepEqual(canary.setup.inputAudioTranscription, {});
+  assert.deepEqual(canary.setup.outputAudioTranscription, {});
+});

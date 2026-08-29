@@ -16,7 +16,7 @@ const report = await runFinalCanaries({
   run: runCommand,
 });
 process.stdout.write(`${JSON.stringify(report)}\n`);
-if (!report.ok) process.exitCode = 1;
+if (!report.automatedOk) process.exitCode = 1;
 
 async function runCommand(command) {
   const [executable, ...args] = command.split(" ");

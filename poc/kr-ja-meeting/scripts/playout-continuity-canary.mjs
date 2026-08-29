@@ -1,7 +1,3 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
 import {
   AudioStream,
   dispose,
@@ -33,7 +29,6 @@ const OPERATION_TIMEOUT_MS = 15_000;
 const livekitUrl = process.env.LIVEKIT_URL ?? "ws://127.0.0.1:7880";
 const livekitApiKey = process.env.LIVEKIT_API_KEY ?? "devkey";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
-const outputRoot = process.env.CANARY_OUTPUT_ROOT ?? "/private/tmp";
 const argumentsByName = readArguments(process.argv.slice(2));
 const repeat = positiveInteger(argumentsByName.get("repeat") ?? "1", "--repeat");
 const seed = positiveInteger(argumentsByName.get("seed") ?? "20260825", "--seed");
@@ -47,20 +42,21 @@ try {
   for (let index = 0; index < repeat; index += 1) {
     results.push(await runOnce({ run: index + 1, seed, injectedGapMs }));
   }
-  const contractResults = results.map(({ scorecard }) => contractResult(scorecard));
-  const resultHashes = contractResults.map((result) => createHash("sha256")
-    .update(JSON.stringify(result))
-    .digest("hex"));
-  const contractConsistent = new Set(resultHashes).size === 1;
+  const contractResults = results.map((scorecard) => contractResult(scorecard));
+  const contractConsistent = new Set(contractResults.map((result) => JSON.stringify(result))).size === 1;
   process.stdout.write(`${JSON.stringify({
-    ok: results.every(({ scorecard }) => scorecard.ok) && contractConsistent,
-    injectedGapMs,
-    repeat,
+    ok: results.every((scorecard) => scorecard.ok) && contractConsistent,
+    injectedGapMilliseconds: injectedGapMs,
     contractConsistent,
-    contractResultHash: resultHashes[0],
-    runs: results.map(({ directory, scorecard }) => ({ directory, scorecard })),
+    runs: results.map((scorecard) => ({
+      continuous: scorecard.ok,
+      maximumGapMilliseconds: scorecard.maxReceiveGapMs,
+      silentRunMilliseconds: scorecard.silentRunMs,
+      tailLossMilliseconds: scorecard.tailLossMs,
+      captureWaitP95Milliseconds: scorecard.captureWaitP95Ms,
+    })),
   })}\n`);
-  if (results.some(({ scorecard }) => !scorecard.ok) || !contractConsistent) process.exitCode = 1;
+  if (results.some((scorecard) => !scorecard.ok) || !contractConsistent) process.exitCode = 1;
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`playout continuity canary failed: ${message}\n`);
@@ -78,7 +74,6 @@ async function runOnce({ run, seed: runSeed, injectedGapMs: gapMs }) {
   let reader;
   let pump;
   const events = [];
-  const receivedPcm = [];
   const received = [];
   const queue = [];
   const startedAt = performance.now();
@@ -99,7 +94,7 @@ async function runOnce({ run, seed: runSeed, injectedGapMs: gapMs }) {
       numChannels: 1,
       frameSizeMs: FRAME_DURATION_MS,
     }).getReader();
-    pump = pumpReceivedAudio(reader, { events, received, receivedPcm, startedAt });
+    pump = pumpReceivedAudio(reader, { events, received, startedAt });
 
     const frame = sineFrame({ sampleOffset: runSeed % SAMPLE_RATE });
     for (let frameIndex = 0; frameIndex < PREFILL_FRAMES; frameIndex += 1) {
@@ -160,23 +155,7 @@ async function runOnce({ run, seed: runSeed, injectedGapMs: gapMs }) {
         0.95,
       ),
     };
-    const directory = await mkdtemp(join(outputRoot, "gemini-live-playout-continuity-"));
-    await Promise.all([
-      writeFile(join(directory, "manifest.json"), `${JSON.stringify({
-        sampleRate: SAMPLE_RATE,
-        frameDurationMs: FRAME_DURATION_MS,
-        prefillMs: PREFILL_FRAMES * FRAME_DURATION_MS,
-        totalFrames: TOTAL_FRAMES,
-        normalStallMs: NORMAL_STALL_MS,
-        injectedGapMs: gapMs,
-        seed: runSeed,
-      }, null, 2)}\n`),
-      writeFile(join(directory, "events.jsonl"),
-        `${events.map((value) => JSON.stringify(value)).join("\n")}\n`),
-      writeFile(join(directory, "received.pcm"), Buffer.concat(receivedPcm)),
-      writeFile(join(directory, "scorecard.json"), `${JSON.stringify(scorecard, null, 2)}\n`),
-    ]);
-    return { directory, scorecard };
+    return scorecard;
   } finally {
     if (reader) await withTimeout(
       reader.cancel(),
@@ -213,7 +192,7 @@ async function capture(sink, frame, frameIndex, startedAt, events, queue, observ
   }
 }
 
-async function pumpReceivedAudio(reader, { events, received, receivedPcm, startedAt }) {
+async function pumpReceivedAudio(reader, { events, received, startedAt }) {
   let audibleStarted = false;
   while (true) {
     const { done, value } = await reader.read();
@@ -225,7 +204,6 @@ async function pumpReceivedAudio(reader, { events, received, receivedPcm, starte
     const valueEvent = event("receive", startedAt, { rms });
     events.push(valueEvent);
     received.push({ receivedAtMs: valueEvent.atMs, rms });
-    receivedPcm.push(Buffer.from(pcm));
   }
 }
 

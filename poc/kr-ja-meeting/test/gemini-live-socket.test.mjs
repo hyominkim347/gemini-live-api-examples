@@ -116,3 +116,29 @@ test("events from a closed socket cannot contaminate a fresh connection", () => 
   assert.equal(stale.sent.length, 0);
   assert.deepEqual(audio, []);
 });
+
+test("canary-only transcription stays in callback memory and is absent from normal setup", () => {
+  const input = [];
+  const output = [];
+  const socket = new FakeSocket("unused");
+  const client = new GeminiLiveTranslateSocket({
+    apiKey: "test-only-key",
+    meetingId: "meeting-1",
+    targetLanguage: "ja",
+    canaryTranscription: true,
+    socketFactory: () => socket,
+    onInputTranscription(value) { input.push(value); },
+    onOutputTranscription(value) { output.push(value); },
+  });
+  client.connect();
+  socket.emit("open");
+  assert.deepEqual(socket.sent[0].setup.inputAudioTranscription, {});
+  assert.deepEqual(socket.sent[0].setup.outputAudioTranscription, {});
+
+  socket.emit("message", JSON.stringify({ serverContent: {
+    inputTranscription: { text: "memory input" },
+    outputTranscription: { text: "memory output" },
+  } }));
+  assert.deepEqual(input, ["memory input"]);
+  assert.deepEqual(output, ["memory output"]);
+});

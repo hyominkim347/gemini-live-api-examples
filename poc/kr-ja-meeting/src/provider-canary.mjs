@@ -55,3 +55,44 @@ export class ProviderCanaryEvidence {
     );
   }
 }
+
+const SEMANTIC_DIRECTIONS = new Set(["ko-to-ja", "ja-to-ko"]);
+
+export class ProviderSemanticEvidence {
+  #trialsByDirection = new Map([
+    ["ko-to-ja", []],
+    ["ja-to-ko", []],
+  ]);
+  #trialIds = new Set();
+
+  record({ direction, trialId, firstMeaning, lastMeaning } = {}) {
+    if (!SEMANTIC_DIRECTIONS.has(direction)) {
+      throw new Error(`unsupported semantic direction: ${direction}`);
+    }
+    if (typeof trialId !== "string" || !trialId) {
+      throw new Error("semantic trial id is required");
+    }
+    if (this.#trialIds.has(trialId)) throw new Error(`duplicate semantic trial: ${trialId}`);
+    if (typeof firstMeaning !== "boolean" || typeof lastMeaning !== "boolean") {
+      throw new Error("semantic meaning evidence must be boolean");
+    }
+    const trials = this.#trialsByDirection.get(direction);
+    if (trials.length >= 3) throw new Error(`too many semantic trials: ${direction}`);
+    this.#trialIds.add(trialId);
+    trials.push({ firstMeaning, lastMeaning });
+  }
+
+  get complete() {
+    return [...this.#trialsByDirection.values()].every((trials) =>
+      trials.length === 3 && trials.every(({ firstMeaning, lastMeaning }) =>
+        firstMeaning && lastMeaning));
+  }
+
+  snapshot() {
+    return {
+      ok: this.complete,
+      "ko-to-ja": this.#trialsByDirection.get("ko-to-ja").map((trial) => ({ ...trial })),
+      "ja-to-ko": this.#trialsByDirection.get("ja-to-ko").map((trial) => ({ ...trial })),
+    };
+  }
+}

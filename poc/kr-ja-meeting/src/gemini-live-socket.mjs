@@ -18,7 +18,10 @@ export class GeminiLiveTranslateSocket {
   #onError;
   #onClose;
   #onServerEvent;
+  #onInputTranscription;
+  #onOutputTranscription;
   #automaticActivityDetection;
+  #canaryTranscription;
   #eventRecorder;
   #participantId;
   #utteranceId;
@@ -39,7 +42,10 @@ export class GeminiLiveTranslateSocket {
     onError,
     onClose,
     onServerEvent,
+    onInputTranscription,
+    onOutputTranscription,
     automaticActivityDetection = true,
+    canaryTranscription = false,
     eventRecorder = { record() {} },
     participantId,
     utteranceId,
@@ -60,7 +66,10 @@ export class GeminiLiveTranslateSocket {
     this.#onError = onError ?? (() => {});
     this.#onClose = onClose ?? (() => {});
     this.#onServerEvent = onServerEvent ?? (() => {});
+    this.#onInputTranscription = onInputTranscription ?? (() => {});
+    this.#onOutputTranscription = onOutputTranscription ?? (() => {});
     this.#automaticActivityDetection = automaticActivityDetection;
+    this.#canaryTranscription = canaryTranscription === true;
     if (!eventRecorder || typeof eventRecorder.record !== "function") {
       throw new Error("eventRecorder.record must be a function");
     }
@@ -88,6 +97,7 @@ export class GeminiLiveTranslateSocket {
             targetLanguage: this.#targetLanguage,
             glossary: this.#glossary,
             automaticActivityDetection: this.#automaticActivityDetection,
+            canaryTranscription: this.#canaryTranscription,
           }),
         ),
       );
@@ -197,6 +207,10 @@ export class GeminiLiveTranslateSocket {
     if (message.serverContent?.turnComplete) {
       this.#onTurnComplete();
     }
+    const inputText = message.serverContent?.inputTranscription?.text;
+    if (typeof inputText === "string" && inputText) this.#onInputTranscription(inputText);
+    const outputText = message.serverContent?.outputTranscription?.text;
+    if (typeof outputText === "string" && outputText) this.#onOutputTranscription(outputText);
   }
 
   #listen(socket, event, handler) {

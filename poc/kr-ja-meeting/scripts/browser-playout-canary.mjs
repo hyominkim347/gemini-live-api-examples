@@ -1,7 +1,3 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
 import { dispose } from "@livekit/rtc-node";
 
 import {
@@ -25,7 +21,6 @@ const OPERATION_TIMEOUT_MS = 15_000;
 const livekitUrl = process.env.LIVEKIT_URL ?? "ws://127.0.0.1:7880";
 const livekitApiKey = process.env.LIVEKIT_API_KEY ?? "devkey";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
-const outputRoot = process.env.CANARY_OUTPUT_ROOT ?? "/private/tmp";
 const argumentsByName = readArguments(process.argv.slice(2));
 const repeat = positiveInteger(argumentsByName.get("repeat") ?? "1", "--repeat");
 const seed = positiveInteger(argumentsByName.get("seed") ?? "20260826", "--seed");
@@ -41,20 +36,19 @@ try {
   for (let index = 0; index < repeat; index += 1) {
     results.push(await runOnce({ run: index + 1, seed, injectedMuteMs }));
   }
-  const contractResults = results.map(({ scorecard }) =>
-    browserPlayoutContractResult(scorecard));
-  const hashes = contractResults.map((value) => createHash("sha256")
-    .update(JSON.stringify(value))
-    .digest("hex"));
-  const contractConsistent = new Set(hashes).size === 1;
-  const ok = results.every(({ scorecard }) => scorecard.ok) && contractConsistent;
+  const contractResults = results.map((scorecard) => browserPlayoutContractResult(scorecard));
+  const contractConsistent = new Set(contractResults.map((value) => JSON.stringify(value))).size === 1;
+  const ok = results.every((scorecard) => scorecard.ok) && contractConsistent;
   process.stdout.write(`${JSON.stringify({
     ok,
-    injectedMuteMs,
-    repeat,
+    injectedMuteMilliseconds: injectedMuteMs,
     contractConsistent,
-    contractResultHash: hashes[0],
-    runs: results.map(({ directory, scorecard }) => ({ directory, scorecard })),
+    runs: results.map((scorecard) => ({
+      continuous: scorecard.ok,
+      maximumGapMilliseconds: scorecard.maxBrowserFrameGapMs,
+      silentRunMilliseconds: scorecard.silentRunMs,
+      tailLossMilliseconds: scorecard.tailLossMs,
+    })),
   })}\n`);
   if (!ok) process.exitCode = 1;
 } catch (error) {
@@ -132,28 +126,7 @@ async function runOnce({ run, seed: runSeed, injectedMuteMs: muteMs }) {
       rtpSampleCount: browserState.rtpSamples.length,
       mediaEventCount: browserState.mediaEvents.length,
     };
-    const directory = await mkdtemp(join(outputRoot, "gemini-live-browser-playout-"));
-    await Promise.all([
-      writeFile(join(directory, "manifest.json"), `${JSON.stringify({
-        sampleRate: SAMPLE_RATE,
-        frameDurationMs: FRAME_DURATION_MS,
-        prefillMs: PREFILL_FRAMES * FRAME_DURATION_MS,
-        totalFrames: TOTAL_FRAMES,
-        normalStallMs: NORMAL_STALL_MS,
-        injectedElementMuteMs: muteMs,
-        seed: runSeed,
-        browserEngine: "chromium",
-        browserChannel: "chrome",
-      }, null, 2)}\n`),
-      writeJsonLines(join(directory, "publisher-events.jsonl"), publisherEvents),
-      writeJsonLines(join(directory, "browser-events.jsonl"), [
-        ...browserFrames.map((value) => ({ type: "browser-frame", ...value })),
-        ...browserState.mediaEvents.map((value) => ({ type: "media-event", ...value })),
-      ].sort((left, right) => left.atMs - right.atMs)),
-      writeJsonLines(join(directory, "receiver-stats.jsonl"), browserState.rtpSamples),
-      writeFile(join(directory, "scorecard.json"), `${JSON.stringify(scorecard, null, 2)}\n`),
-    ]);
-    return { directory, scorecard };
+    return scorecard;
   } finally {
     if (browserPlayout) await browserPlayout.close().catch(() => {});
     if (gateway) await withTimeout(gateway.close(), OPERATION_TIMEOUT_MS, "gateway close")
@@ -181,13 +154,6 @@ function trimLeadingSilence(frames) {
   let start = 0;
   while (start < frames.length && frames[start].rms < 0.01) start += 1;
   return frames.slice(start);
-}
-
-function writeJsonLines(path, values) {
-  const contents = values.length > 0
-    ? `${values.map((value) => JSON.stringify(value)).join("\n")}\n`
-    : "";
-  return writeFile(path, contents);
 }
 
 function readArguments(args) {

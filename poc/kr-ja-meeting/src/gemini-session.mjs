@@ -4,6 +4,7 @@ export function buildGeminiSetup({
   targetLanguage,
   glossary = [],
   automaticActivityDetection = true,
+  canaryTranscription = false,
 }) {
   if (!TARGET_LANGUAGES.has(targetLanguage)) {
     throw new Error(`unsupported target language: ${targetLanguage}`);
@@ -23,6 +24,10 @@ export function buildGeminiSetup({
         automaticActivityDetection: { disabled: !automaticActivityDetection },
       },
   };
+  if (canaryTranscription === true) {
+    setup.inputAudioTranscription = {};
+    setup.outputAudioTranscription = {};
+  }
   if (terms.length > 0) {
     setup.systemInstruction = {
       parts: [{

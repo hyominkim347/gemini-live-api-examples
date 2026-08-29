@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -24,5 +24,18 @@ for (const root of roots) {
       process.exit(result.status ?? 1);
     }
   }
+}
+for (const file of await sourceFiles("scripts")) {
+  const contents = await readFile(file, "utf8");
+  if (/['"][^'"\n]+\.pcm['"]/.test(contents)) {
+    throw new Error(`raw PCM evidence files are forbidden: ${file}`);
+  }
+  if (/['"][^'"\n]+\.jsonl['"]|['"](?:manifest|scorecard)\.json['"]/.test(contents)) {
+    throw new Error(`persistent canary evidence files are forbidden: ${file}`);
+  }
+}
+const productServer = await readFile("src/server.mjs", "utf8");
+if (/canaryTranscription\s*:\s*true/.test(productServer)) {
+  throw new Error("product server must not enable canary transcription");
 }
 console.log("source syntax: ok");

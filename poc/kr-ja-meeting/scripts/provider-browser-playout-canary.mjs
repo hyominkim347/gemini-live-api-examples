@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +34,6 @@ const PROVIDER_IDLE_MS = 1_500;
 const livekitUrl = process.env.LIVEKIT_URL ?? "ws://127.0.0.1:7880";
 const livekitApiKey = process.env.LIVEKIT_API_KEY ?? "devkey";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
-const outputRoot = process.env.CANARY_OUTPUT_ROOT ?? "/private/tmp";
 const repeat = readRepeat(process.argv.slice(2));
 const temporaryDirectories = [];
 let geminiApiKey = "";
@@ -43,26 +41,25 @@ let geminiApiKey = "";
 try {
   geminiApiKey = readApiKey();
   const inputPcm = synthesizeKoreanPcm();
-  const inputSha256 = createHash("sha256").update(inputPcm).digest("hex");
   const results = [];
   for (let run = 1; run <= repeat; run += 1) {
-    results.push(await runOnce({ run, inputPcm, inputSha256 }));
+    results.push(await runOnce({ run, inputPcm }));
   }
-  const contracts = results.map(({ scorecard }) => dualProbeContractResult(scorecard));
-  const contractHashes = contracts.map((contract) => createHash("sha256")
-    .update(JSON.stringify(contract))
-    .digest("hex"));
-  const contractConsistent = new Set(contractHashes).size === 1;
-  const ok = results.every(({ scorecard }) => scorecard.ok) && contractConsistent;
-  const scorecards = results.map(({ scorecard }) => scorecard);
+  const contracts = results.map((scorecard) => dualProbeContractResult(scorecard));
+  const contractConsistent = new Set(contracts.map((contract) => JSON.stringify(contract))).size === 1;
+  const ok = results.every((scorecard) => scorecard.ok) && contractConsistent;
+  const scorecards = results;
   process.stdout.write(`${JSON.stringify({
     ok,
-    repeat,
     contractConsistent,
-    contractResultHash: contractHashes[0],
     latency: summarizeProviderBrowserRuns(scorecards),
-    providerSilentRunMs: scorecards.map((scorecard) => scorecard.providerSilentRunMs),
-    runs: results.map(({ directory, scorecard }) => ({ directory, scorecard })),
+    runs: scorecards.map((scorecard) => ({
+      continuous: scorecard.ok,
+      firstProviderAudioMilliseconds: scorecard.firstProviderAudioMs,
+      providerEndAfterInputEndMilliseconds: scorecard.providerEndAfterInputEndMs,
+      maximumBrowserGapMilliseconds: scorecard.maxBrowserFrameGapMs,
+      tailLossMilliseconds: scorecard.tailLossMs,
+    })),
   })}\n`);
   if (!ok) process.exitCode = 1;
 } catch (error) {
@@ -79,17 +76,15 @@ try {
     rm(directory, { recursive: true, force: true })));
 }
 
-async function runOnce({ run, inputPcm, inputSha256 }) {
+async function runOnce({ run, inputPcm }) {
   const runId = `${Date.now()}-${process.pid}-${run}`;
   const roomName = `provider-browser-${runId}`;
-  const directory = await mkdtemp(join(outputRoot, "gemini-live-provider-browser-"));
   let publisher;
   let gateway;
   let browserPlayout;
   let gemini;
   let publisherQueueTimer;
   const providerPcm = [];
-  const providerEvents = [];
   const publisherQueue = [];
   let captureChain = Promise.resolve();
   let captureError;
@@ -159,12 +154,6 @@ async function runOnce({ run, inputPcm, inputSha256 }) {
           lastProviderAtMs = atMs;
         }
         providerPcm.push(pcm);
-        providerEvents.push({
-          type: "gemini-audio",
-          atMs,
-          byteLength: pcm.length,
-          rms,
-        });
         captureChain = captureChain.then(async () => {
           if (captureError) return;
           try {
@@ -255,29 +244,7 @@ async function runOnce({ run, inputPcm, inputSha256 }) {
         ...timing,
       };
     }
-    await Promise.all([
-      writeFile(join(directory, "input.pcm"), inputPcm),
-      writeFile(join(directory, "provider-output.pcm"), providerOutput),
-      writeFile(join(directory, "manifest.json"), `${JSON.stringify({
-        run,
-        inputSha256,
-        inputSampleRate: INPUT_SAMPLE_RATE,
-        providerSampleRate: PROVIDER_SAMPLE_RATE,
-        frameDurationMs: FRAME_DURATION_MS,
-        browserEngine: "chromium",
-        browserChannel: "chrome",
-      }, null, 2)}\n`),
-      writeJsonLines(join(directory, "provider-events.jsonl"), providerEvents),
-      writeJsonLines(join(directory, "publisher-queue.jsonl"), publisherQueue),
-      writeJsonLines(join(directory, "browser-events.jsonl"), [
-        ...browserState.rawTrackFrames.map((frame) => ({ type: "raw-track-frame", ...frame })),
-        ...browserState.frames.map((frame) => ({ type: "browser-frame", ...frame })),
-        ...browserState.mediaEvents.map((event) => ({ type: "media-event", ...event })),
-      ].sort((left, right) => left.atMs - right.atMs)),
-      writeJsonLines(join(directory, "receiver-stats.jsonl"), browserState.rtpSamples),
-      writeFile(join(directory, "scorecard.json"), `${JSON.stringify(scorecard, null, 2)}\n`),
-    ]);
-    return { directory, scorecard };
+    return scorecard;
   } finally {
     if (publisherQueueTimer) clearInterval(publisherQueueTimer);
     gemini?.close();
@@ -359,13 +326,6 @@ function readRepeat(args) {
     throw new Error("--repeat must be a positive integer");
   }
   return value;
-}
-
-function writeJsonLines(path, values) {
-  const contents = values.length > 0
-    ? `${values.map((value) => JSON.stringify(value)).join("\n")}\n`
-    : "";
-  return writeFile(path, contents);
 }
 
 function delay(milliseconds) {
