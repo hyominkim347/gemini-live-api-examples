@@ -7,7 +7,7 @@ import unittest
 
 class PilotAcceptance(unittest.TestCase):
     def test_agent_only_gate(self):
-        repository = Path(__file__).resolve().parents[1]
+        repository = Path(__file__).resolve().parents[3]
         package = repository / "poc" / "kr-ja-meeting"
         raw_path = Path(
             os.environ.get(
