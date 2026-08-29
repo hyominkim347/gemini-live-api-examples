@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 const EVENT_TYPES = new Set([
   "meeting-joined",
   "meeting-left",
@@ -54,7 +56,7 @@ export class MeetingEventRecorder {
   #clock;
   #write;
 
-  constructor({ meetingId, clock = () => Date.now(), write } = {}) {
+  constructor({ meetingId, clock = () => performance.now(), write } = {}) {
     requireString(meetingId, "meetingId");
     if (typeof clock !== "function") throw new Error("event clock must be a function");
     if (typeof write !== "function") throw new Error("event writer must be a function");

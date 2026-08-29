@@ -124,10 +124,16 @@ test("handoff drains and closes the focused bridge before subscribing the next s
     },
   });
 
-  await bridge.start({ id: "ja-1", language: "ja" });
+  await bridge.start(
+    { id: "ja-1", language: "ja" },
+    { utteranceId: "utterance-1" },
+  );
   originalFrame(Buffer.from([1, 2]), 16_000);
   await clients[0].options.onTranslatedAudio(Buffer.from([3, 4]).toString("base64"));
-  await bridge.handoff({ id: "ko-1", language: "ko" });
+  await bridge.handoff(
+    { id: "ko-1", language: "ko" },
+    { previousUtteranceId: "utterance-1", utteranceId: "utterance-2" },
+  );
 
   assert.deepEqual(calls, [
     "sink:ko",
@@ -142,6 +148,8 @@ test("handoff drains and closes the focused bridge before subscribing the next s
     "subscribe:original:ko-1",
   ]);
   assert.equal(clients.length, 2);
+  assert.equal(clients[0].options.utteranceId, "utterance-1");
+  assert.equal(clients[1].options.utteranceId, "utterance-2");
   await bridge.abort();
 });
 

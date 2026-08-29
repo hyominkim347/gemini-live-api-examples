@@ -240,10 +240,10 @@ export class LiveTranslationBridge {
     if (failure) throw failure.reason;
   }
 
-  async handoff(speaker) {
+  async handoff(speaker, { utteranceId } = {}) {
     await this.stop();
     try {
-      await this.start(speaker);
+      await this.start(speaker, { utteranceId });
     } catch (error) {
       await settle(this.abort());
       throw error;
