@@ -165,6 +165,72 @@ test("vacated focus waits for a continuing overlap candidate to satisfy minimum 
   });
 });
 
+test("a failed pending-focus bridge start stays locked out until that utterance ends", async () => {
+  let now = 0;
+  let participantSequence = 0;
+  let utteranceSequence = 0;
+  let failSecondUtterance = true;
+  const starts = [];
+  const events = [];
+  const { service } = createService({
+    clock: () => now,
+    minimumFocusHoldMilliseconds: 500,
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    utteranceIdFactory: () => `utterance-${++utteranceSequence}`,
+    eventRecorder: { record(event) { events.push(event); } },
+    translationBridge: {
+      async start(participant, utterance) {
+        starts.push({ participantId: participant.id, utteranceId: utterance.utteranceId });
+        if (utterance.utteranceId === "utterance-2" && failSecondUtterance) {
+          throw new Error("setup retry exhausted");
+        }
+      },
+      async stop() {},
+      async handoff() {},
+    },
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "Sora", language: "ja" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 0 });
+  now = 100;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 100 });
+  now = 200;
+  await service.speechActivity({ participantId: first.id, type: "speech-end", observedAt: 200 });
+
+  now = 600;
+  await assert.rejects(service.refresh(), /setup retry exhausted/);
+  now = 700;
+  assert.equal((await service.refresh()).translationFocusId, null);
+  now = 800;
+  assert.equal((await service.refresh()).translationFocusId, null);
+  assert.deepEqual(starts, [
+    { participantId: first.id, utteranceId: "utterance-1" },
+    { participantId: second.id, utteranceId: "utterance-2" },
+  ]);
+  assert.deepEqual(
+    events.filter(({ errorCode }) => errorCode === "translation-recovery-unavailable")
+      .map(({ type, participantId, utteranceId, result, errorCode }) => ({
+        type, participantId, utteranceId, result, errorCode,
+      })),
+    [{
+      type: "utterance-aborted",
+      participantId: second.id,
+      utteranceId: "utterance-2",
+      result: "aborted",
+      errorCode: "translation-recovery-unavailable",
+    }],
+  );
+  assert.equal(service.snapshot().participants.find(({ id }) => id === second.id).speech, "speaking");
+
+  await service.speechActivity({ participantId: second.id, type: "speech-end", observedAt: 800 });
+  failSecondUtterance = false;
+  now = 900;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 900 });
+  assert.deepEqual(starts.at(-1), { participantId: second.id, utteranceId: "utterance-3" });
+});
+
 test("dynamic participant joins with a generated id and can leave", async () => {
   const { service } = createService();
 

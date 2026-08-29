@@ -253,6 +253,7 @@ test("browser start, gap, and end retain the authoritative plan utterance id", a
   translation.element.dispatch("waiting");
   translation.element.dispatch("waiting");
   translation.element.dispatch("playing");
+  translation.element.dispatch("waiting");
   playout.detach(translation);
 
   assert.deepEqual(
@@ -261,7 +262,57 @@ test("browser start, gap, and end retain the authoritative plan utterance id", a
     [
       { type: "playout-started", utteranceId: "utterance-7" },
       { type: "playout-gap", utteranceId: "utterance-7" },
+      { type: "playout-gap", utteranceId: "utterance-7" },
       { type: "playout-completed", utteranceId: "utterance-7" },
+    ],
+  );
+});
+
+test("a new utterance on the same track closes the old lifecycle before actual playback restarts", async () => {
+  const { container, makeTrack } = fixture({ play: async () => {} });
+  const events = [];
+  const playout = new BrowserAudioPlayout(container, {
+    onPlayoutEvent(event) { events.push(event); },
+  });
+  const translation = makeTrack("translation:ko");
+  const plan = (utteranceId) => ({
+    mode: "translation-focused",
+    tracks: [{
+      trackId: translation.trackId,
+      kind: "translation",
+      role: "foreground",
+      gain: 1,
+      utteranceId,
+    }],
+  });
+
+  playout.setPlan(plan("utterance-1"));
+  playout.attach(translation, { trackName: translation.trackId });
+  await new Promise((resolve) => setImmediate(resolve));
+  playout.setPlan(plan("utterance-2"));
+
+  assert.deepEqual(
+    events.filter(({ type }) => ["playout-started", "playout-completed"].includes(type))
+      .map(({ type, utteranceId, result }) => ({ type, utteranceId, result })),
+    [
+      { type: "playout-started", utteranceId: "utterance-1", result: "started" },
+      { type: "playout-completed", utteranceId: "utterance-1", result: "superseded" },
+    ],
+  );
+
+  translation.element.dispatch("timeupdate");
+  translation.element.dispatch("waiting");
+  playout.detach(translation);
+
+  assert.deepEqual(
+    events.filter(({ type }) => ["playout-started", "playout-gap", "playout-completed"].includes(type))
+      .map(({ type, utteranceId, result }) => ({ type, utteranceId, result })),
+    [
+      { type: "playout-started", utteranceId: "utterance-1", result: "started" },
+      { type: "playout-completed", utteranceId: "utterance-1", result: "superseded" },
+      { type: "playout-started", utteranceId: "utterance-2", result: "started" },
+      { type: "playout-gap", utteranceId: "utterance-2", result: "interrupted" },
+      { type: "playout-completed", utteranceId: "utterance-2", result: "detached" },
     ],
   );
 });

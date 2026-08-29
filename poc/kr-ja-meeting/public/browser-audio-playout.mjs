@@ -41,6 +41,15 @@ export class BrowserAudioPlayout {
     for (const [trackId, entry] of this.#entryByTrackId) {
       if (!nextGains.has(trackId)) this.#removeEntry(trackId, entry);
     }
+    for (const [trackId, entry] of this.#entryByTrackId) {
+      const nextUtteranceId = nextUtteranceIds.get(trackId);
+      if (entry.utteranceId === nextUtteranceId) continue;
+      this.#complete(trackId, entry, "superseded");
+      entry.utteranceId = nextUtteranceId;
+      entry.gapActive = false;
+      entry.playbackStarted = false;
+      entry.lifecycleEnded = false;
+    }
     this.#gainByTrackId = nextGains;
     this.#utteranceIdByTrackId = nextUtteranceIds;
     this.#mode = listeningPlan?.mode ?? "silent";
@@ -105,12 +114,14 @@ export class BrowserAudioPlayout {
       gapActive: false,
       playbackStarted: false,
       lifecycleEnded: false,
+      utteranceId: this.#utteranceIdByTrackId.get(trackId),
       listeners: [],
     };
     this.#entryByTrackId.set(trackId, entry);
     this.#listen(entry, "waiting", () => this.#reportGap(trackId, entry));
     this.#listen(entry, "stalled", () => this.#reportGap(trackId, entry));
-    this.#listen(entry, "playing", () => { entry.gapActive = false; });
+    this.#listen(entry, "playing", () => this.#startPlayback(trackId, entry));
+    this.#listen(entry, "timeupdate", () => this.#startPlayback(trackId, entry));
     this.#listen(entry, "ended", () => this.#complete(trackId, entry, "ended"));
     this.#emitPlayout({
       type: "playout-attached",
@@ -118,7 +129,7 @@ export class BrowserAudioPlayout {
       listeningMode: this.#mode,
       gain: element.volume,
       result: "attached",
-      ...this.#utteranceContext(trackId),
+      ...this.#utteranceContext(entry),
     });
     if (typeof element.play === "function") {
       let playResult;
@@ -139,15 +150,7 @@ export class BrowserAudioPlayout {
       }
       Promise.resolve(playResult).then(() => {
         if (this.#entryByTrackId.get(trackId)?.element !== element || entry.lifecycleEnded) return;
-        entry.playbackStarted = true;
-        this.#emitPlayout({
-          type: "playout-started",
-          trackId,
-          listeningMode: this.#mode,
-          gain: element.volume,
-          result: "started",
-          ...this.#utteranceContext(trackId),
-        });
+        this.#startPlayback(trackId, entry);
       }, () => {
         if (this.#entryByTrackId.get(trackId)?.element !== element) return;
         this.#emitPlayout({
@@ -157,7 +160,7 @@ export class BrowserAudioPlayout {
           gain: element.volume,
           result: "failed",
           errorCode: "browser-play-failed",
-          ...this.#utteranceContext(trackId),
+          ...this.#utteranceContext(entry),
         });
         entry.lifecycleEnded = true;
       });
@@ -208,7 +211,21 @@ export class BrowserAudioPlayout {
       gain: entry.element.volume,
       result: "interrupted",
       errorCode: "browser-playout-gap",
-      ...this.#utteranceContext(trackId),
+      ...this.#utteranceContext(entry),
+    });
+  }
+
+  #startPlayback(trackId, entry) {
+    entry.gapActive = false;
+    if (entry.lifecycleEnded || entry.playbackStarted) return;
+    entry.playbackStarted = true;
+    this.#emitPlayout({
+      type: "playout-started",
+      trackId,
+      listeningMode: this.#mode,
+      gain: entry.element.volume,
+      result: "started",
+      ...this.#utteranceContext(entry),
     });
   }
 
@@ -221,12 +238,14 @@ export class BrowserAudioPlayout {
       listeningMode: this.#mode,
       gain: entry.element.volume,
       result,
-      ...this.#utteranceContext(trackId),
+      ...this.#utteranceContext(entry),
     });
   }
 
-  #utteranceContext(trackId) {
-    const utteranceId = this.#utteranceIdByTrackId.get(trackId);
+  #utteranceContext(entryOrTrackId) {
+    const utteranceId = typeof entryOrTrackId === "string"
+      ? this.#utteranceIdByTrackId.get(entryOrTrackId)
+      : entryOrTrackId?.utteranceId;
     return utteranceId ? { utteranceId } : {};
   }
 

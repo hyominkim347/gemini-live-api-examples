@@ -444,3 +444,61 @@ test("browser playout ids are validated against the authoritative listening plan
     timestamp: 80,
   });
 });
+
+test("successive utterances on one translation track keep separate authoritative playout timelines", async () => {
+  const { service, events, setNow } = timelineService();
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "Sora", language: "ja" })).participant;
+  const listener = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 0 });
+  await service.playout(listener.id, {
+    type: "playout-started",
+    trackId: "translation:ko",
+    utteranceId: "utterance-1",
+  });
+  setNow(100);
+  await service.speechActivity({ participantId: first.id, type: "speech-end", observedAt: 100 });
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 100 });
+
+  await assert.rejects(service.playout(listener.id, {
+    type: "playout-gap",
+    trackId: "translation:ko",
+    utteranceId: "utterance-1",
+  }), /superseded/);
+  await service.playout(listener.id, {
+    type: "playout-completed",
+    trackId: "translation:ko",
+    utteranceId: "utterance-1",
+    result: "superseded",
+  });
+  await assert.rejects(service.playout(listener.id, {
+    type: "playout-completed",
+    trackId: "translation:ko",
+    utteranceId: "utterance-1",
+    result: "superseded",
+  }), /utteranceId does not match/);
+  await service.playout(listener.id, {
+    type: "playout-started",
+    trackId: "translation:ko",
+    utteranceId: "utterance-2",
+  });
+  await service.playout(listener.id, {
+    type: "playout-completed",
+    trackId: "translation:ko",
+    utteranceId: "utterance-2",
+    result: "ended",
+  });
+
+  assert.deepEqual(
+    events.filter(({ type, trackId }) => trackId === "translation:ko" && type.startsWith("playout-"))
+      .map(({ type, utteranceId, result }) => ({ type, utteranceId, result })),
+    [
+      { type: "playout-started", utteranceId: "utterance-1", result: "started" },
+      { type: "playout-completed", utteranceId: "utterance-1", result: "superseded" },
+      { type: "playout-started", utteranceId: "utterance-2", result: "started" },
+      { type: "playout-completed", utteranceId: "utterance-2", result: "ended" },
+    ],
+  );
+});
