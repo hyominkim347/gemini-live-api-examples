@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 import { MeetingSession } from "./meeting-session.mjs";
 import { TranslationFocusPolicy } from "./translation-focus-policy.mjs";
 
 const SUPPORTED_LANGUAGES = new Set(["ko", "ja"]);
 const SPEECH_ACTIVITY_TYPES = new Set(["speech-start", "speech-end"]);
+const PLAYOUT_EVENT_TYPES = new Set([
+  "playout-attached",
+  "playout-started",
+  "playout-completed",
+  "playout-aborted",
+]);
 
 export class BrowserMeetingService {
   #roomName;
@@ -18,7 +25,6 @@ export class BrowserMeetingService {
   #onListeningEvent;
   #eventRecorder;
   #clock;
-  #overlapDetectedRecorded = false;
   #listeningPlanKeyByParticipantId = new Map();
   #actionChain = Promise.resolve();
 
@@ -29,8 +35,7 @@ export class BrowserMeetingService {
     translationBridge,
     participantIdFactory = () => `participant-${randomUUID()}`,
     utteranceIdFactory = () => `utterance-${randomUUID()}`,
-    clock = () => Date.now(),
-    minimumFocusHoldMilliseconds,
+    clock = () => performance.now(),
     overlapWarningMilliseconds,
     onListeningEvent = () => {},
     eventRecorder = { record() {} },
@@ -47,7 +52,6 @@ export class BrowserMeetingService {
     this.#clock = clock;
     this.#translationFocusPolicy = new TranslationFocusPolicy({
       clock,
-      minimumFocusHoldMilliseconds,
       overlapWarningMilliseconds,
     });
     if (typeof onListeningEvent !== "function") throw new Error("onListeningEvent must be a function");
@@ -119,18 +123,19 @@ export class BrowserMeetingService {
         throw new Error(`unsupported speech activity: ${type}`);
       }
       if (!Number.isFinite(observedAt)) throw new Error("speech activity observedAt is required");
+      const eventAt = this.#eventTimestamp();
       const participant = this.#session.participant(participantId);
       if (type === "speech-start") {
         if (this.#session.isSpeaking(participantId)) return this.snapshot();
         const utteranceId = this.#utteranceIdFactory();
-        const beforeFocus = this.#translationFocusPolicy.snapshot(observedAt);
+        const beforeFocus = this.#translationFocusPolicy.snapshot(eventAt);
         const previousFocusId = this.#session.translationFocusId;
         this.#session.startSpeech(participantId, utteranceId);
-        const focus = this.#translationFocusPolicy.speechStarted(participantId, observedAt);
+        const focus = this.#translationFocusPolicy.speechStarted(participantId, eventAt);
         this.#session.setTranslationFocus(focus.translationFocusId);
         try {
           if (!previousFocusId) {
-            await this.#translationBridge.start(participant, { utteranceId, observedAt });
+            await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
           }
           this.#recordParticipant("speech-started", participant, {
             utteranceId,
@@ -140,7 +145,7 @@ export class BrowserMeetingService {
           this.#recordListeningPlans();
         } catch (error) {
           this.#session.endSpeech(participantId);
-          this.#translationFocusPolicy.speechEnded(participantId, observedAt);
+          this.#translationFocusPolicy.speechEnded(participantId, eventAt);
           this.#recordParticipant("utterance-aborted", participant, {
             utteranceId,
             result: "aborted",
@@ -150,24 +155,53 @@ export class BrowserMeetingService {
         }
       } else {
         if (!this.#session.isSpeaking(participantId)) return this.snapshot();
-        await this.#endSpeech(participantId, observedAt);
+        await this.#endSpeech(participantId, eventAt);
       }
       return this.snapshot();
     });
   }
 
   snapshot() {
-    const focus = this.#translationFocusPolicy.snapshot();
+    const focus = this.#translationFocusPolicy.snapshot(this.#eventTimestamp());
+    this.#recordPendingOverlapTransitions();
     return {
       ...this.#session.snapshot(),
       speakingParticipantIds: focus.speakingParticipantIds,
       translationFocusId: focus.translationFocusId,
       focus: {
         selectedAt: focus.focusSelectedAt,
-        protectedUntil: focus.focusProtectedUntil,
       },
       overlap: focus.overlap,
     };
+  }
+
+  playout(participantId, event = {}) {
+    return this.#enqueue(async () => {
+      const participant = this.#session.participant(participantId);
+      if (!PLAYOUT_EVENT_TYPES.has(event.type)) {
+        throw new Error(`unsupported playout event: ${event.type}`);
+      }
+      if (typeof event.trackId !== "string" || !event.trackId) {
+        throw new Error("playout trackId is required");
+      }
+      const trackKind = event.trackId.startsWith("translation:") ? "translation"
+        : event.trackId.startsWith("original:") ? "original"
+          : null;
+      if (!trackKind) throw new Error("unsupported playout trackId");
+      const targetLanguage = trackKind === "translation"
+        ? event.trackId.slice("translation:".length)
+        : participant.language;
+      this.#recordParticipant(event.type, participant, {
+        targetLanguage,
+        listeningMode: event.listeningMode,
+        trackId: event.trackId,
+        trackKind,
+        gain: event.gain,
+        result: event.result,
+        errorCode: event.errorCode,
+      });
+      return { recorded: true };
+    });
   }
 
   listeningMode(participantId, mode) {
@@ -195,7 +229,7 @@ export class BrowserMeetingService {
   async #endSpeech(participantId, observedAt) {
     const participant = this.#session.participant(participantId);
     const endedUtteranceId = this.#utteranceIdFor(participantId);
-    const eventAt = Number.isFinite(observedAt) ? observedAt : this.#clock();
+    const eventAt = Number.isFinite(observedAt) ? observedAt : this.#eventTimestamp();
     const beforeFocus = this.#translationFocusPolicy.snapshot(eventAt);
     const wasFocused = this.#session.translationFocusId === participantId;
     const previousUtteranceId = wasFocused ? endedUtteranceId : null;
@@ -223,11 +257,11 @@ export class BrowserMeetingService {
         await this.#translationBridge.handoff(nextParticipant, {
           previousUtteranceId,
           utteranceId: nextState.utteranceId,
-          observedAt,
+          observedAt: eventAt,
         });
         this.#session.setTranslationFocus(focus.translationFocusId);
       } else {
-        await this.#translationBridge.stop({ utteranceId: previousUtteranceId, observedAt });
+        await this.#translationBridge.stop({ utteranceId: previousUtteranceId, observedAt: eventAt });
       }
       this.#recordParticipant("utterance-completed", participant, {
         utteranceId: previousUtteranceId,
@@ -299,16 +333,9 @@ export class BrowserMeetingService {
     if (!before.overlap.active && after.overlap.active) {
       this.#recordParticipant("overlap-started", participant, { utteranceId, result: "active" });
     }
-    if (before.overlap.detected && !this.#overlapDetectedRecorded) {
-      this.#overlapDetectedRecorded = true;
-      this.#recordParticipant("overlap-detected", participant, { utteranceId, result: "warning" });
-    } else if (after.overlap.detected && !this.#overlapDetectedRecorded) {
-      this.#overlapDetectedRecorded = true;
-      this.#recordParticipant("overlap-detected", participant, { utteranceId, result: "warning" });
-    }
+    this.#recordPendingOverlapTransitions();
     if (before.overlap.active && !after.overlap.active) {
       this.#recordParticipant("overlap-ended", participant, { utteranceId, result: "ended" });
-      this.#overlapDetectedRecorded = false;
     }
 
     if (before.translationFocusId === after.translationFocusId) return;
@@ -350,5 +377,24 @@ export class BrowserMeetingService {
     } catch {
       // Observability hooks cannot change the meeting contract.
     }
+  }
+
+  #recordPendingOverlapTransitions() {
+    for (const transition of this.#translationFocusPolicy.takeTransitions()) {
+      const participantId = transition.participantIds.at(-1);
+      const participant = this.#session.participant(participantId);
+      this.#recordParticipant(transition.type, participant, {
+        utteranceId: this.#utteranceIdFor(participantId),
+        targetLanguage: participant.language === "ko" ? "ja" : "ko",
+        detectedAt: transition.observedAt,
+        result: "warning",
+      });
+    }
+  }
+
+  #eventTimestamp() {
+    const timestamp = this.#clock();
+    if (!Number.isFinite(timestamp)) throw new Error("meeting clock must return a finite timestamp");
+    return timestamp;
   }
 }

@@ -63,6 +63,7 @@ export class LiveTranslationBridge {
       participantId: speaker.id,
       utteranceId,
       language: speaker.language,
+      targetLanguage,
     };
     this.#record("gemini-setup-started", context, { result: "started" });
     try {
@@ -86,7 +87,6 @@ export class LiveTranslationBridge {
             if (!outputRecorded) {
               outputRecorded = true;
               this.#record("gemini-output-received", context, { result: "received" });
-              this.#record("playout-started", context, { result: "started" });
             }
           }
           captureChain = captureChain.then(() => sink.capture(pcm));
@@ -224,14 +224,14 @@ export class LiveTranslationBridge {
     } finally {
       active.gemini.close();
       this.#active = null;
-      const playoutSucceeded = active.hasAudibleInput()
+      const outputSucceeded = active.hasAudibleInput()
         && results.slice(0, 2).every(({ status }) => status === "fulfilled");
       this.#record(
-        playoutSucceeded ? "playout-completed" : "playout-aborted",
+        outputSucceeded ? "gemini-output-completed" : "gemini-output-aborted",
         active.context,
         {
-          result: playoutSucceeded ? "completed" : "aborted",
-          ...(playoutSucceeded ? {} : { errorCode: "playout-incomplete" }),
+          result: outputSucceeded ? "completed" : "aborted",
+          ...(outputSucceeded ? {} : { errorCode: "translation-output-incomplete" }),
         },
       );
       this.#record("resources-closed", active.context, { result: "closed" });
@@ -270,7 +270,7 @@ export class LiveTranslationBridge {
       settle(active.capture()),
     ]);
     active.gemini.close();
-    this.#record("playout-aborted", active.context, {
+    this.#record("gemini-output-aborted", active.context, {
       result: "aborted",
       errorCode: "translation-aborted",
     });

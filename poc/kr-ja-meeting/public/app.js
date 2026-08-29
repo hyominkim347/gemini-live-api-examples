@@ -21,6 +21,14 @@ const audioPlayout = new BrowserAudioPlayout(audioOutput, {
   },
   onPlayoutEvent(event) {
     window.dispatchEvent(new CustomEvent("bridge:playout", { detail: event }));
+    if (localParticipant) {
+      void postJson("/api/meeting/playout", {
+        participantId: localParticipant.id,
+        ...event,
+      }).catch(() => {
+        // Diagnostic delivery cannot interrupt browser audio playback.
+      });
+    }
   },
 });
 let displayName = "";

@@ -284,7 +284,7 @@ export class GeminiLiveTranslateSocket {
         type: `gemini-retry-${outcome}`,
         participantId: this.#participantId,
         utteranceId: this.#utteranceId,
-        language: this.#targetLanguage,
+        targetLanguage: this.#targetLanguage,
         result: outcome,
         ...(errorCode ? { errorCode } : {}),
       });

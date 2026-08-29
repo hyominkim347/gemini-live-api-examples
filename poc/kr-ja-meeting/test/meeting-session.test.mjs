@@ -66,6 +66,27 @@ test("one automatic speaker produces relation-based listener audio plans", () =>
   });
 });
 
+test("overlap keeps every same-language original in the foreground beside one translation", () => {
+  const session = new MeetingSession([
+    { id: "ja-focus", name: "Yuki", language: "ja" },
+    { id: "ko-overlap", name: "민준", language: "ko" },
+    { id: "ko-listener", name: "서연", language: "ko" },
+  ]);
+  session.setMicrophone("ja-focus", true);
+  session.setMicrophone("ko-overlap", true);
+  session.startSpeech("ja-focus", "utterance-1");
+  session.startSpeech("ko-overlap", "utterance-2");
+
+  assert.deepEqual(session.audioPlanFor("ko-listener"), {
+    mode: "translation-focused",
+    tracks: [
+      { trackId: "original:ja-focus", kind: "original", role: "background", gain: 0.2 },
+      { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
+      { trackId: "original:ko-overlap", kind: "original", role: "foreground", gain: 1 },
+    ],
+  });
+});
+
 test("mic off ends speech but does not remove the participant", () => {
   const session = new MeetingSession([{ id: "ja-1", name: "Yuki", language: "ja" }]);
   session.setMicrophone("ja-1", true);

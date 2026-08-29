@@ -26,7 +26,7 @@ async function waitFor(check) {
   throw new Error("condition was not reached");
 }
 
-function timelineService({ bridge, minimumFocusHoldMilliseconds, overlapWarningMilliseconds } = {}) {
+function timelineService({ bridge, overlapWarningMilliseconds } = {}) {
   let participantSequence = 0;
   let utteranceSequence = 0;
   let now = 0;
@@ -49,7 +49,6 @@ function timelineService({ bridge, minimumFocusHoldMilliseconds, overlapWarningM
     tokenIssuer: async ({ id }) => `token:${id}`,
     translationBridge,
     eventRecorder: recorder,
-    minimumFocusHoldMilliseconds,
     overlapWarningMilliseconds,
     clock: () => now,
   });
@@ -90,7 +89,6 @@ test("normal speech is correlated from join through completed utterance and clea
 
 test("overlap warning and focus handoff retain participant and utterance correlation", async () => {
   const { service, events, setNow } = timelineService({
-    minimumFocusHoldMilliseconds: 500,
     overlapWarningMilliseconds: 1_000,
   });
   const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
@@ -132,6 +130,36 @@ test("overlap warning and focus handoff retain participant and utterance correla
       { type: "utterance-completed", utteranceId: "utterance-2" },
     ],
   );
+});
+
+test("overlap detection is emitted once when a server-clock snapshot crosses the threshold", async () => {
+  const { service, events, setNow } = timelineService({ overlapWarningMilliseconds: 1_000 });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "Sora", language: "ja" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 10 });
+  setNow(100);
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 20 });
+
+  setNow(1_099);
+  service.snapshot();
+  assert.equal(events.filter(({ type }) => type === "overlap-detected").length, 0);
+  setNow(1_100);
+  service.snapshot();
+  service.snapshot();
+
+  assert.deepEqual(events.filter(({ type }) => type === "overlap-detected"), [{
+    type: "overlap-detected",
+    meetingId: "meeting-1",
+    participantId: second.id,
+    utteranceId: "utterance-2",
+    language: "ja",
+    targetLanguage: "ko",
+    detectedAt: 1_100,
+    result: "warning",
+    timestamp: 1_100,
+  }]);
 });
 
 test("listener mode and applied gains are recorded without audio content", async () => {
@@ -280,7 +308,7 @@ test("a failed Gemini retry aborts the correlated utterance and closes resources
   assert.equal(serialized.includes("private-token"), false);
 });
 
-test("Gemini input and output are correlated with LiveKit subscription and playout", async () => {
+test("Gemini input and output are correlated without claiming browser playout", async () => {
   const events = [];
   let originalFrame;
   let callbacks;
@@ -328,10 +356,42 @@ test("Gemini input and output are correlated with LiveKit subscription and playo
     "livekit-subscribe-succeeded",
     "gemini-input-received",
     "gemini-output-received",
-    "playout-started",
-    "playout-completed",
+    "gemini-output-completed",
     "resources-closed",
   ]);
   assert.ok(events.every(({ participantId, utteranceId }) =>
     participantId === "participant-1" && utteranceId === "utterance-1"));
+  assert.ok(events.every(({ targetLanguage }) => targetLanguage === "ko"));
+});
+
+test("browser playout failure reaches the privacy-safe meeting timeline", async () => {
+  const { service, events, setNow } = timelineService();
+  const listener = (await service.join({ name: "민준", language: "ko" })).participant;
+  setNow(50);
+
+  await service.playout(listener.id, {
+    type: "playout-aborted",
+    trackId: "translation:ko",
+    listeningMode: "translation-focused",
+    gain: 1,
+    result: "failed",
+    errorCode: "browser-play-failed",
+    rawAudio: "private",
+  });
+
+  assert.deepEqual(events.at(-1), {
+    type: "playout-aborted",
+    meetingId: "meeting-1",
+    participantId: listener.id,
+    language: "ko",
+    targetLanguage: "ko",
+    listeningMode: "translation-focused",
+    trackId: "translation:ko",
+    trackKind: "translation",
+    gain: 1,
+    result: "failed",
+    errorCode: "browser-play-failed",
+    timestamp: 50,
+  });
+  assert.equal(JSON.stringify(events).includes("private"), false);
 });

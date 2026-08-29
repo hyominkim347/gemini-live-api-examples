@@ -19,6 +19,8 @@ const EVENT_TYPES = new Set([
   "gemini-input-started",
   "gemini-input-received",
   "gemini-output-received",
+  "gemini-output-completed",
+  "gemini-output-aborted",
   "gemini-retry-started",
   "gemini-retry-succeeded",
   "gemini-retry-failed",
@@ -31,6 +33,7 @@ const EVENT_TYPES = new Set([
   "listening-mode-changed",
   "listening-mode-restored",
   "listening-gain-applied",
+  "playout-attached",
   "playout-started",
   "playout-completed",
   "playout-aborted",
@@ -43,6 +46,7 @@ const STRING_FIELDS = [
   "participantId",
   "utteranceId",
   "language",
+  "targetLanguage",
   "result",
   "errorCode",
   "relatedParticipantId",
@@ -83,6 +87,10 @@ export class MeetingEventRecorder {
         throw new Error("gain must be between zero and one");
       }
       safe.gain = event.gain;
+    }
+    if (event.detectedAt !== undefined) {
+      if (!Number.isFinite(event.detectedAt)) throw new Error("detectedAt must be finite");
+      safe.detectedAt = event.detectedAt;
     }
     safe.timestamp = timestamp;
     try {
