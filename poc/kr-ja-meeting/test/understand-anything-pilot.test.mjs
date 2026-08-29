@@ -49,8 +49,33 @@ test("budgeted runner kills an over-budget child before delayed side effects", a
   }
 });
 
+test("pilot commands reject output roots outside approved .ua-pilot storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-pilot-output-reject-"));
+  try {
+    for (const command of ["manifest", "plan"]) {
+      const result = runPilot([
+        command,
+        "--repo", projectRoot,
+        "--artifact-root", join(root, "visible-output"),
+      ]);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /\.ua-pilot/);
+    }
+    const budgeted = runPilot([
+      "run-budgeted",
+      "--artifact-root", join(root, "visible-output"),
+      "--phase", "fullAnalysis",
+    ]);
+    assert.notEqual(budgeted.status, 0);
+    assert.match(budgeted.stderr, /\.ua-pilot/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("manifest fixes the Analysis Snapshot and excludes non-corpus files", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-manifest-"));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-manifest-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
   const untrackedSentinel = join(projectRoot, "ua-pilot-untracked-secret.env");
 
   try {
@@ -78,12 +103,13 @@ test("manifest fixes the Analysis Snapshot and excludes non-corpus files", async
     assert.equal(excluded.has("ua-pilot-untracked-secret.env"), false);
   } finally {
     await rm(untrackedSentinel, { force: true });
-    await rm(artifactRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("plan pins isolated upstream execution and disables redirect and automation", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-plan-"));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-plan-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
 
   try {
     const result = runPilot([
@@ -111,8 +137,8 @@ test("plan pins isolated upstream execution and disables redirect and automation
     });
     const expectedCommand = [
       "codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
-      "--sandbox", "workspace-write", "-C", join(artifactRoot, "analysis-snapshot"),
-      "--add-dir", join(artifactRoot, "understand-anything"), "-",
+      "--sandbox", "workspace-write", "-C", plan.snapshotCheckout,
+      "--add-dir", plan.upstream.checkout, "-",
     ];
     assert.deepEqual(plan.phaseInvocations, {
       fullAnalysis: { command: expectedCommand, promptFile: "codex-prompt.md" },
@@ -126,12 +152,13 @@ test("plan pins isolated upstream execution and disables redirect and automation
     assert.ok(plan.prohibited.includes("symlink"));
     assert.ok(plan.prohibited.includes("new-provider-credentials"));
   } finally {
-    await rm(artifactRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("run-budgeted rejects an injected child command before execution", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-budget-run-"));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-budget-run-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
   const snapshotCheckout = join(artifactRoot, "analysis-snapshot");
 
   try {
@@ -151,12 +178,13 @@ test("run-budgeted rejects an injected child command before execution", async ()
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Unexpected argument/);
   } finally {
-    await rm(artifactRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("prepare refuses an upstream source that lacks the reviewed commit", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-prepare-reject-"));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-prepare-reject-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
 
   try {
     const result = runPilot([
@@ -169,15 +197,17 @@ test("prepare refuses an upstream source that lacks the reviewed commit", async 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /ba450c43425f3de6d43daf76526950ad8ca93536/);
   } finally {
-    await rm(artifactRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("verify-scan rejects any inventory outside the tracked Analysis Corpus", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-verify-scan-"));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-verify-scan-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
   const scanResult = join(artifactRoot, "scan-result.json");
 
   try {
+    await mkdir(artifactRoot, { recursive: true });
     await writeFile(join(artifactRoot, "corpus-manifest.json"), JSON.stringify({
       analysisSnapshot: snapshot,
       included: [{ path: "src/app.mjs", category: "code" }],
@@ -194,16 +224,18 @@ test("verify-scan rejects any inventory outside the tracked Analysis Corpus", as
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /unexpected=untracked\.env/);
   } finally {
-    await rm(artifactRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
 
 test("verify-artifact rejects self-reports and accepts runner-issued metrics", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-verify-artifact-"));
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-verify-artifact-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
   const snapshotCheckout = join(artifactRoot, "analysis-snapshot");
   const uaDirectory = join(snapshotCheckout, ".ua");
   const intermediate = join(uaDirectory, "intermediate");
   const fakeBin = join(artifactRoot, "fake-bin");
+  const environmentCapture = join(artifactRoot, "child-environment.json");
 
   try {
     const planned = runPilot([
@@ -263,7 +295,13 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
 
     await mkdir(fakeBin, { recursive: true });
     const fakeCodex = join(fakeBin, "codex");
-    await writeFile(fakeCodex, "#!/bin/sh\ncat >/dev/null\n", "utf8");
+    await writeFile(fakeCodex, [
+      "#!/usr/bin/env node",
+      "const { writeFileSync } = require('node:fs');",
+      `writeFileSync(${JSON.stringify(environmentCapture)}, JSON.stringify(process.env));`,
+      "process.stdin.resume();",
+      "",
+    ].join("\n"), "utf8");
     await chmod(fakeCodex, 0o755);
     await writeFile(join(artifactRoot, "run-metrics.json"), JSON.stringify({
       fullAnalysis: { status: "not-run" },
@@ -272,6 +310,7 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
     const runnerEnvironment = {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH}`,
+      UA_FORBIDDEN_SECRET: "must-not-reach-codex",
     };
     for (const phase of ["fullAnalysis", "incrementalRefresh"]) {
       const run = runPilot([
@@ -279,11 +318,14 @@ test("verify-artifact rejects self-reports and accepts runner-issued metrics", a
       ], { env: runnerEnvironment });
       assert.equal(run.status, 0, run.stderr || run.stdout);
     }
+    const childEnvironment = JSON.parse(await readFile(environmentCapture, "utf8"));
+    assert.equal(childEnvironment.UA_FORBIDDEN_SECRET, undefined);
+    assert.equal(childEnvironment.UNDERSTAND_NO_WORKTREE_REDIRECT, "1");
     const accepted = runPilot(["verify-artifact", "--artifact-root", artifactRoot]);
     assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
     const report = JSON.parse(await readFile(join(artifactRoot, "artifact-verification.json"), "utf8"));
     assert.equal(report.passed, true);
   } finally {
-    await rm(artifactRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });

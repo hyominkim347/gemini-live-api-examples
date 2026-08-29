@@ -1,13 +1,29 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { ANALYSIS_SNAPSHOT } from "./understand-anything-pilot.mjs";
+import {
+  ANALYSIS_SNAPSHOT,
+  loadCurrentPilotArtifact,
+} from "./understand-anything-pilot.mjs";
+import {
+  buildCodexPermissionConfig,
+  copyTrackedCorpus,
+  copyRegularFileWithin,
+  createIsolatedMaterialRoot,
+  digestMaterialRoot,
+  initializeEmptyPilotOutput,
+  readRegularPilotFile,
+  requireApprovedPilotOutput,
+  requirePilotChildDirectory,
+  resolvePilotChildPath,
+  spawnCodexChild,
+  validateIsolatedMaterialLayout,
+} from "./pilot-local-safety.mjs";
 
 const PROVIDER = "current-codex-provider-only";
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -90,29 +106,16 @@ async function readJson(path, label = path) {
 
 async function regularFile(path) {
   try {
-    return (await stat(path)).isFile();
+    const fileStat = await lstat(path);
+    return fileStat.isFile() && !fileStat.isSymbolicLink();
   } catch (error) {
     if (error.code === "ENOENT") return false;
     throw error;
   }
 }
 
-function requireDescendant(root, candidate, label) {
-  const rel = relative(resolve(root), resolve(candidate));
-  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`${label} must be below ${resolve(root)}`);
-  }
-}
-
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
-}
-
-function insideGitCheckout(path) {
-  const result = spawnSync("git", ["-C", resolve(path), "rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-  });
-  return result.status === 0;
 }
 
 function relationKey(relation) {
@@ -151,7 +154,49 @@ function sanitizedQuestions(benchmark) {
   return benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
 }
 
-function crossedRuns(questions, timeoutMs) {
+export function validateComparisonPlanSeal({ planText, sealText, schemaText }) {
+  const seal = JSON.parse(sealText);
+  if (
+    seal.contractVersion !== 1 ||
+    seal.planSha256 !== sha256(planText) ||
+    seal.schemaSha256 !== sha256(schemaText)
+  ) {
+    throw new Error("Raw comparison plan or schema changed after prepare");
+  }
+  return JSON.parse(planText);
+}
+
+export function validateComparisonPlanControls({ plan, benchmark, benchmarkText }) {
+  validateBenchmark(benchmark);
+  const expectedQuestions = sanitizedQuestions(benchmark);
+  const expectedRuns = buildCrossedRuns(expectedQuestions, plan.timeoutMs);
+  const hashFields = [
+    ...Object.values(plan.pilotArtifact ?? {}),
+    ...Object.values(plan.materialDigests ?? {}),
+  ];
+  if (
+    plan.contractVersion !== 1 ||
+    plan.scored !== false ||
+    plan.lane !== "agent" ||
+    plan.provider !== PROVIDER ||
+    plan.analysisSnapshot !== ANALYSIS_SNAPSHOT ||
+    plan.benchmarkRevision !== benchmark.revision ||
+    plan.benchmarkFrozenAt !== benchmark.frozenAt ||
+    plan.benchmarkSha256 !== sha256(benchmarkText) ||
+    !Number.isInteger(plan.timeoutMs) ||
+    plan.timeoutMs <= 0 ||
+    plan.orderPolicy !== "odd-graph-first-even-rg-first" ||
+    !Number.isFinite(Date.parse(plan.preparedAt)) ||
+    hashFields.length !== 6 ||
+    hashFields.some((value) => !/^[a-f0-9]{64}$/.test(value)) ||
+    JSON.stringify(plan.questions) !== JSON.stringify(expectedQuestions) ||
+    JSON.stringify(plan.runs) !== JSON.stringify(expectedRuns)
+  ) {
+    throw new Error("Raw comparison plan is invalid");
+  }
+}
+
+export function buildCrossedRuns(questions, timeoutMs) {
   const runs = [];
   for (const [index, question] of questions.entries()) {
     const arms = index % 2 === 0
@@ -173,7 +218,10 @@ function crossedRuns(questions, timeoutMs) {
 }
 
 async function loadPilotInputs(pilotArtifactRoot) {
-  const artifactRoot = resolve(pilotArtifactRoot);
+  const artifactRoot = await requireApprovedPilotOutput(
+    pilotArtifactRoot,
+    "Agent comparison Pilot Artifact",
+  );
   const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"), "pilot plan");
   const manifest = await readJson(resolve(artifactRoot, "corpus-manifest.json"), "corpus manifest");
   const snapshotRoot = resolve(plan.snapshotCheckout ?? "");
@@ -193,20 +241,6 @@ async function loadPilotInputs(pilotArtifactRoot) {
     throw new Error("Analysis Corpus manifest requires included[]");
   }
   return { artifactRoot, plan, manifest, snapshotRoot, graphPath, graph };
-}
-
-async function copyCorpus(snapshotRoot, included, targetRoot) {
-  for (const entry of included) {
-    if (!entry?.path || isAbsolute(entry.path) || entry.path.split(/[\\/]/).includes("..")) {
-      throw new Error(`Unsafe Analysis Corpus path: ${entry?.path ?? "missing"}`);
-    }
-    const source = resolve(snapshotRoot, entry.path);
-    const target = resolve(targetRoot, entry.path);
-    requireDescendant(targetRoot, target, "rg material file");
-    if (!(await regularFile(source))) throw new Error(`Analysis Corpus file is missing: ${entry.path}`);
-    await mkdir(dirname(target), { recursive: true });
-    await copyFile(source, target);
-  }
 }
 
 export function buildArmPrompt({ question, arm }) {
@@ -234,8 +268,7 @@ export function buildCodexExecArgs({ materialRoot, schemaPath, answerPath }) {
     "--ephemeral",
     "--ignore-user-config",
     "--skip-git-repo-check",
-    "--sandbox",
-    "read-only",
+    ...buildCodexPermissionConfig(materialRoot),
     "--cd",
     resolve(materialRoot),
     "--output-schema",
@@ -253,20 +286,23 @@ export async function prepareAgentComparison({
   now = () => new Date().toISOString(),
 }) {
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new Error("timeoutMs must be a positive integer");
-  const inputs = await loadPilotInputs(pilotArtifactRoot);
+  const requestedResultRoot = await requireApprovedPilotOutput(
+    outputDir,
+    "Agent Lane Paired Comparison output",
+  );
+  const inputs = await loadCurrentPilotArtifact(pilotArtifactRoot);
+  const resultRoot = await initializeEmptyPilotOutput(
+    requestedResultRoot,
+    "Agent Lane Paired Comparison output",
+  );
   const benchmarkText = await readFile(DEFAULT_BENCHMARK_PATH, "utf8");
   if (sha256(benchmarkText) !== FROZEN_BENCHMARK_SHA256) {
     throw new Error("Frozen Impact Benchmark content changed");
   }
   const benchmark = JSON.parse(benchmarkText);
   validateBenchmark(benchmark);
-  const resultRoot = resolve(outputDir);
-  if (!resultRoot.split(/[\\/]/).includes(".ua-pilot")) {
-    throw new Error("Agent Lane Paired Comparison output must be local .ua-pilot storage");
-  }
   const planPath = resolve(resultRoot, "raw-comparison-plan.json");
-  if (await regularFile(planPath)) throw new Error(`Comparison plan already exists: ${planPath}`);
-  const materialsRoot = resolve(resultRoot, "materials");
+  const materialsRoot = await createIsolatedMaterialRoot("ua-comparison-material-");
   const graphMaterialRoot = resolve(materialsRoot, "graph");
   const rgMaterialRoot = resolve(materialsRoot, "rg");
   const schemaPath = resolve(resultRoot, "raw-answer.schema.json");
@@ -275,12 +311,18 @@ export async function prepareAgentComparison({
     mkdir(rgMaterialRoot, { recursive: true }),
     mkdir(resolve(resultRoot, "runs"), { recursive: true }),
   ]);
-  if (insideGitCheckout(resultRoot)) {
-    throw new Error("Agent Lane material roots must be outside every Git checkout");
-  }
   await Promise.all([
-    copyFile(inputs.graphPath, resolve(graphMaterialRoot, "knowledge-graph.json")),
-    copyCorpus(inputs.snapshotRoot, inputs.manifest.included, rgMaterialRoot),
+    copyRegularFileWithin({
+      sourceRoot: inputs.graphDirectory,
+      relativePath: "knowledge-graph.json",
+      targetRoot: graphMaterialRoot,
+      targetPath: resolve(graphMaterialRoot, "knowledge-graph.json"),
+    }),
+    copyTrackedCorpus({
+      snapshotRoot: inputs.snapshotRoot,
+      included: inputs.manifest.included,
+      targetRoot: rgMaterialRoot,
+    }),
   ]);
   const questions = sanitizedQuestions(benchmark);
   const plan = {
@@ -297,8 +339,23 @@ export async function prepareAgentComparison({
     orderPolicy: "odd-graph-first-even-rg-first",
     freshContext: {
       required: true,
-      mechanism: "codex exec --ephemeral --ignore-user-config --sandbox read-only",
+      mechanism: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       resumeOrForkAllowed: false,
+    },
+    pilotArtifact: {
+      planSha256: inputs.planSha256,
+      manifestSha256: inputs.manifestSha256,
+      corpusDigestSha256: inputs.corpusDigestSha256,
+      graphSha256: inputs.graphSha256,
+    },
+    materialRoots: {
+      root: materialsRoot,
+      understandAnythingGraph: graphMaterialRoot,
+      repositorySearchRg: rgMaterialRoot,
+    },
+    materialDigests: {
+      understandAnythingGraph: await digestMaterialRoot(graphMaterialRoot),
+      repositorySearchRg: await digestMaterialRoot(rgMaterialRoot),
     },
     materialPolicy: {
       understandAnythingGraph: "sanitized-knowledge-graph-only",
@@ -308,11 +365,19 @@ export async function prepareAgentComparison({
       previousAnswersIncluded: false,
     },
     questions,
-    runs: crossedRuns(questions, timeoutMs),
+    runs: buildCrossedRuns(questions, timeoutMs),
   };
+  const planText = `${JSON.stringify(plan, null, 2)}\n`;
+  const schemaText = `${JSON.stringify(ANSWER_SCHEMA, null, 2)}\n`;
+  const sealText = `${JSON.stringify({
+    contractVersion: 1,
+    planSha256: sha256(planText),
+    schemaSha256: sha256(schemaText),
+  }, null, 2)}\n`;
   await Promise.all([
-    writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8"),
-    writeFile(schemaPath, `${JSON.stringify(ANSWER_SCHEMA, null, 2)}\n`, "utf8"),
+    writeFile(planPath, planText, "utf8"),
+    writeFile(schemaPath, schemaText, "utf8"),
+    writeFile(resolve(resultRoot, "raw-comparison-seal.json"), sealText, "utf8"),
   ]);
   return { planPath, schemaPath, graphMaterialRoot, rgMaterialRoot, outputDir: resultRoot };
 }
@@ -336,8 +401,9 @@ export async function verifyRawAnswer({
   question,
   answer,
   answerTimeMs,
+  pilotInputs,
 }) {
-  const inputs = await loadPilotInputs(pilotArtifactRoot);
+  const inputs = pilotInputs ?? await loadPilotInputs(pilotArtifactRoot);
   validateAnswerShape(answer);
   if (!run?.runId || !Number.isInteger(run.sequence) || run.questionId !== question?.id) {
     throw new Error("Raw answer run identity is invalid");
@@ -445,20 +511,82 @@ export async function verifyRawAnswer({
 }
 
 async function loadComparison(outputDir) {
-  const resultRoot = resolve(outputDir);
-  const plan = await readJson(resolve(resultRoot, "raw-comparison-plan.json"), "raw comparison plan");
-  if (
-    plan.scored !== false ||
-    plan.provider !== PROVIDER ||
-    plan.analysisSnapshot !== ANALYSIS_SNAPSHOT ||
-    !Array.isArray(plan.questions) ||
-    plan.questions.length !== 12 ||
-    !Array.isArray(plan.runs) ||
-    plan.runs.length !== 24
-  ) {
-    throw new Error("Raw comparison plan is invalid");
+  const resultRoot = await requireApprovedPilotOutput(
+    outputDir,
+    "Agent Lane Paired Comparison output",
+  );
+  const [planFile, sealFile, schemaFile, benchmarkText] = await Promise.all([
+    readRegularPilotFile(resultRoot, "raw-comparison-plan.json", "raw comparison plan"),
+    readRegularPilotFile(resultRoot, "raw-comparison-seal.json", "raw comparison seal"),
+    readRegularPilotFile(resultRoot, "raw-answer.schema.json", "raw answer schema"),
+    readFile(DEFAULT_BENCHMARK_PATH, "utf8"),
+  ]);
+  const plan = validateComparisonPlanSeal({
+    planText: planFile.text,
+    sealText: sealFile.text,
+    schemaText: schemaFile.text,
+  });
+  if (sha256(benchmarkText) !== FROZEN_BENCHMARK_SHA256) {
+    throw new Error("Frozen Impact Benchmark content changed");
   }
-  return { resultRoot, plan, schemaPath: resolve(resultRoot, "raw-answer.schema.json") };
+  const benchmark = JSON.parse(benchmarkText);
+  validateComparisonPlanControls({ plan, benchmark, benchmarkText });
+  for (const run of plan.runs) {
+    resolvePilotChildPath(resultRoot, `runs/${run.runId}`, "Agent comparison run path");
+  }
+  const materialRoots = await validateCurrentMaterials(plan);
+  return {
+    resultRoot,
+    plan,
+    materialRoots,
+    schemaPath: schemaFile.path,
+  };
+}
+
+async function validateCurrentMaterials(plan) {
+  const materialLayout = await validateIsolatedMaterialLayout({
+    root: plan.materialRoots?.root,
+    children: {
+      understandAnythingGraph: plan.materialRoots?.understandAnythingGraph,
+      repositorySearchRg: plan.materialRoots?.repositorySearchRg,
+    },
+  });
+  const currentMaterialDigests = {
+    understandAnythingGraph: await digestMaterialRoot(
+      materialLayout.children.understandAnythingGraph,
+    ),
+    repositorySearchRg: await digestMaterialRoot(
+      materialLayout.children.repositorySearchRg,
+    ),
+  };
+  if (
+    currentMaterialDigests.understandAnythingGraph !==
+      plan.materialDigests?.understandAnythingGraph ||
+    currentMaterialDigests.repositorySearchRg !== plan.materialDigests?.repositorySearchRg
+  ) {
+    throw new Error("Agent comparison material changed after prepare");
+  }
+  return materialLayout.children;
+}
+
+function requireCurrentPilotBinding(binding, currentInputs) {
+  if (
+    binding?.planSha256 !== currentInputs.planSha256 ||
+    binding?.manifestSha256 !== currentInputs.manifestSha256 ||
+    binding?.corpusDigestSha256 !== currentInputs.corpusDigestSha256 ||
+    binding?.graphSha256 !== currentInputs.graphSha256
+  ) {
+    throw new Error("Pilot Artifact changed after Agent comparison prepare");
+  }
+}
+
+async function requireCurrentComparisonState({ pilotArtifactRoot, plan }) {
+  const [currentInputs, materialRoots] = await Promise.all([
+    loadCurrentPilotArtifact(pilotArtifactRoot),
+    validateCurrentMaterials(plan),
+  ]);
+  requireCurrentPilotBinding(plan.pilotArtifact, currentInputs);
+  return { currentInputs, materialRoots };
 }
 
 async function writeAggregate(resultRoot, plan, results) {
@@ -485,9 +613,14 @@ async function materializeRawResult({
   run,
   question,
   runRoot,
+  pilotInputs,
 }) {
-  const execution = await readJson(resolve(runRoot, "execution.json"), `${run.runId} execution`);
-  const answer = await readJson(resolve(runRoot, "provider-answer.json"), `${run.runId} provider answer`);
+  const [executionFile, answerFile] = await Promise.all([
+    readRegularPilotFile(runRoot, "execution.json", `${run.runId} execution`),
+    readRegularPilotFile(runRoot, "provider-answer.json", `${run.runId} provider answer`),
+  ]);
+  const execution = JSON.parse(executionFile.text);
+  const answer = JSON.parse(answerFile.text);
   if (
     execution.provider !== PROVIDER ||
     execution.freshContext !== true ||
@@ -502,6 +635,7 @@ async function materializeRawResult({
     question,
     answer,
     answerTimeMs: execution.answerTimeMs,
+    pilotInputs,
   });
   await writeFile(resolve(runRoot, "raw-result.json"), `${JSON.stringify(rawResult, null, 2)}\n`, "utf8");
   return rawResult;
@@ -516,7 +650,13 @@ export async function runAgentComparison({
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
   for (const run of plan.runs) {
-    const runRoot = resolve(resultRoot, "runs", run.runId);
+    let currentState = await requireCurrentComparisonState({ pilotArtifactRoot, plan });
+    const runRoot = await requirePilotChildDirectory(
+      resultRoot,
+      `runs/${run.runId}`,
+      "Agent comparison run path",
+      { create: true },
+    );
     const resultPath = resolve(runRoot, "raw-result.json");
     if (await regularFile(resultPath)) {
       const question = questionById.get(run.questionId);
@@ -527,34 +667,37 @@ export async function runAgentComparison({
         run,
         question,
         runRoot,
+        pilotInputs: currentState.currentInputs,
       }));
       process.stdout.write(`${JSON.stringify({ event: "run-reused", runId: run.runId, sequence: run.sequence })}\n`);
       continue;
     }
-    await mkdir(runRoot, { recursive: true });
+    if ((await readdir(runRoot)).length > 0) {
+      throw new Error(`Incomplete or pre-seeded run output for ${run.runId}`);
+    }
     const question = questionById.get(run.questionId);
     if (!question) throw new Error(`Question missing for run ${run.runId}`);
     const prompt = buildArmPrompt({ question, arm: run.arm });
     const promptPath = resolve(runRoot, "prompt.md");
     const providerAnswerPath = resolve(runRoot, "provider-answer.json");
-    const materialRoot = resolve(resultRoot, "materials", run.arm === "understandAnythingGraph" ? "graph" : "rg");
+    const materialRoot = currentState.materialRoots[run.arm];
     const args = buildCodexExecArgs({ materialRoot, schemaPath, answerPath: providerAnswerPath });
     await writeFile(promptPath, prompt, "utf8");
     process.stdout.write(`${JSON.stringify({ event: "run-started", runId: run.runId, sequence: run.sequence, arm: run.arm })}\n`);
     const startedAt = new Date().toISOString();
     const start = performance.now();
-    const launched = spawnSync(codexExecutable, args, {
-      input: prompt,
-      encoding: "utf8",
-      timeout: run.timeoutMs,
-      maxBuffer: 32 * 1024 * 1024,
+    const launched = spawnCodexChild({
+      executable: codexExecutable,
+      args,
+      prompt,
+      timeoutMs: run.timeoutMs,
     });
     const answerTimeMs = Math.max(0.01, Math.round((performance.now() - start) * 100) / 100);
     const finishedAt = new Date().toISOString();
     const execution = {
       provider: PROVIDER,
       freshContext: true,
-      invocation: "codex exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read-only",
+      invocation: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       timeoutMs: run.timeoutMs,
       startedAt,
       finishedAt,
@@ -566,12 +709,14 @@ export async function runAgentComparison({
     if (launched.status !== 0) {
       throw new Error(`Fresh Codex run ${run.runId} exited ${launched.status ?? launched.signal ?? "without status"}`);
     }
+    currentState = await requireCurrentComparisonState({ pilotArtifactRoot, plan });
     const rawResult = await materializeRawResult({
       pilotArtifactRoot,
       plan,
       run,
       question,
       runRoot,
+      pilotInputs: currentState.currentInputs,
     });
     results.push(rawResult);
     process.stdout.write(`${JSON.stringify({ event: "run-completed", runId: run.runId, sequence: run.sequence, validationStatus: rawResult.validationStatus, answerTimeMs })}\n`);
@@ -585,13 +730,19 @@ export async function verifyAgentComparison({ pilotArtifactRoot, outputDir }) {
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
   for (const run of plan.runs) {
-    const runRoot = resolve(resultRoot, "runs", run.runId);
+    const currentState = await requireCurrentComparisonState({ pilotArtifactRoot, plan });
+    const runRoot = await requirePilotChildDirectory(
+      resultRoot,
+      `runs/${run.runId}`,
+      "Agent comparison run path",
+    );
     const rawResult = await materializeRawResult({
       pilotArtifactRoot,
       plan,
       run,
       question: questionById.get(run.questionId),
       runRoot,
+      pilotInputs: currentState.currentInputs,
     });
     results.push(rawResult);
   }

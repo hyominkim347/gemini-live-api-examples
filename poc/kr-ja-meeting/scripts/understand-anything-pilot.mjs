@@ -7,6 +7,12 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
+import {
+  buildCodexChildEnv,
+  loadVerifiedPilotArtifact,
+  requireApprovedPilotOutput,
+} from "./pilot-local-safety.mjs";
+
 export const ANALYSIS_SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
 export const UPSTREAM_REPOSITORY = "https://github.com/Egonex-AI/Understand-Anything.git";
 export const UPSTREAM_COMMIT = "ba450c43425f3de6d43daf76526950ad8ca93536";
@@ -245,6 +251,16 @@ export function buildCorpusManifest(repo) {
   };
 }
 
+export function loadCurrentPilotArtifact(pilotArtifactRoot) {
+  return loadVerifiedPilotArtifact({
+    artifactRoot: pilotArtifactRoot,
+    analysisSnapshot: ANALYSIS_SNAPSHOT,
+    upstreamCommit: UPSTREAM_COMMIT,
+    expectedManifestForSource: buildCorpusManifest,
+    provider: "current-codex-provider-only",
+  });
+}
+
 function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index += 1) {
@@ -263,7 +279,10 @@ function parseOptions(args) {
 async function manifestCommand(args) {
   const options = parseOptions(args);
   const repo = options.repo ? resolve(options.repo) : process.cwd();
-  const artifactRoot = resolve(options["artifact-root"] ?? resolve(repo, ".ua-pilot"));
+  const artifactRoot = await requireApprovedPilotOutput(
+    options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
+    "Understand-Anything manifest output",
+  );
   const manifest = buildCorpusManifest(repo);
   await mkdir(artifactRoot, { recursive: true });
   await writeFile(
@@ -375,7 +394,10 @@ function buildCodexPrompt(plan, phase = "fullAnalysis") {
 async function planCommand(args) {
   const options = parseOptions(args);
   const repo = options.repo ? resolve(options.repo) : process.cwd();
-  const artifactRoot = resolve(options["artifact-root"] ?? resolve(repo, ".ua-pilot"));
+  const artifactRoot = await requireApprovedPilotOutput(
+    options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
+    "Understand-Anything plan output",
+  );
   const plan = buildPilotPlan(repo, artifactRoot);
   await mkdir(artifactRoot, { recursive: true });
   await Promise.all([
@@ -468,7 +490,10 @@ async function writeSnapshotIgnore(snapshotCheckout, manifest) {
 async function prepareCommand(args) {
   const options = parseOptions(args);
   const repo = options.repo ? resolve(options.repo) : process.cwd();
-  const artifactRoot = resolve(options["artifact-root"] ?? resolve(repo, ".ua-pilot"));
+  const artifactRoot = await requireApprovedPilotOutput(
+    options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
+    "Understand-Anything prepare output",
+  );
   const upstreamSource = options["upstream-source"] ?? UPSTREAM_REPOSITORY;
   const manifest = buildCorpusManifest(repo);
   const plan = buildPilotPlan(repo, artifactRoot);
@@ -540,7 +565,10 @@ async function prepareCommand(args) {
 
 async function runBudgetedCommand(args) {
   const options = parseOptions(args);
-  const artifactRoot = resolve(options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"));
+  const artifactRoot = await requireApprovedPilotOutput(
+    options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
+    "Understand-Anything budget runner output",
+  );
   const phase = options.phase;
   if (!PHASES.includes(phase)) {
     throw new Error("--phase must be fullAnalysis or incrementalRefresh");
@@ -575,7 +603,7 @@ async function runBudgetedCommand(args) {
     budgetMilliseconds,
     command: expectedCommand,
     cwd: plan.snapshotCheckout,
-    env: { ...process.env, ...plan.environment },
+    env: { ...buildCodexChildEnv(), ...plan.environment },
     stdinText: promptText,
   });
   const metricsPath = resolve(artifactRoot, "run-metrics.json");
@@ -594,7 +622,10 @@ async function readJson(path) {
 
 async function verifyScanCommand(args) {
   const options = parseOptions(args);
-  const artifactRoot = resolve(options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"));
+  const artifactRoot = await requireApprovedPilotOutput(
+    options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
+    "Understand-Anything inventory output",
+  );
   const manifest = await readJson(resolve(artifactRoot, "corpus-manifest.json"));
   const planPath = resolve(artifactRoot, "pilot-plan.json");
   const plan = await pathExists(planPath) ? await readJson(planPath) : null;
@@ -644,7 +675,10 @@ async function verifyScanCommand(args) {
 
 async function verifyArtifactCommand(args) {
   const options = parseOptions(args);
-  const artifactRoot = resolve(options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"));
+  const artifactRoot = await requireApprovedPilotOutput(
+    options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
+    "Understand-Anything verification output",
+  );
   const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"));
   const manifest = await readJson(resolve(artifactRoot, "corpus-manifest.json"));
   const prepared = await readJson(resolve(artifactRoot, "prepare-result.json"));

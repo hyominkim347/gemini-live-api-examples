@@ -3,13 +3,23 @@
 import { performance } from "node:perf_hooks";
 import { readFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import {
   ANALYSIS_SNAPSHOT,
   CALIBRATION_QUESTION,
+  loadCurrentPilotArtifact,
 } from "./understand-anything-pilot.mjs";
+import {
+  assertIsolatedMaterialRoot,
+  buildCodexPermissionConfig,
+  copyTrackedCorpus,
+  copyRegularFileWithin,
+  createIsolatedMaterialRoot,
+  initializeEmptyPilotOutput,
+  requireApprovedPilotOutput,
+  spawnCodexChild,
+} from "./pilot-local-safety.mjs";
 
 const PROVIDER = "current-codex-provider-only";
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -98,10 +108,6 @@ async function isRegularFile(path) {
   }
 }
 
-function graphPathFor(plan) {
-  return resolve(plan.snapshotCheckout, ".ua/knowledge-graph.json");
-}
-
 function answerArrays(answer) {
   for (const field of ["codeEvidence", "testEvidence", "graphNodeIds", "graphRelations"]) {
     if (!Array.isArray(answer[field])) throw new Error(`Evidence Answer ${field} must be an array`);
@@ -144,8 +150,8 @@ export function buildCodexExecArgs({ snapshotRoot, schemaPath, answerPath }) {
     "exec",
     "--ephemeral",
     "--ignore-user-config",
-    "--sandbox",
-    "read-only",
+    "--skip-git-repo-check",
+    ...buildCodexPermissionConfig(snapshotRoot),
     "--cd",
     resolve(snapshotRoot),
     "--output-schema",
@@ -160,12 +166,19 @@ export async function prepareCalibration({
   pilotArtifactRoot,
   outputDir,
   now = () => new Date().toISOString(),
+  loadPilotInputs = loadCurrentPilotArtifact,
+  createMaterialRoot = () => createIsolatedMaterialRoot("ua-calibration-material-"),
 }) {
-  const artifactRoot = resolve(pilotArtifactRoot);
-  const resultRoot = resolve(outputDir);
-  const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"));
-  const graphPath = graphPathFor(plan);
-  const graph = await readJson(graphPath);
+  const artifactRoot = await requireApprovedPilotOutput(
+    pilotArtifactRoot,
+    "Agent calibration Pilot Artifact",
+  );
+  const requestedResultRoot = await requireApprovedPilotOutput(
+    outputDir,
+    "Agent calibration output",
+  );
+  const inputs = await loadPilotInputs(artifactRoot);
+  const { plan, manifest, graphPath, graph } = inputs;
   if (plan.provider !== PROVIDER) {
     throw new Error(`Agent Lane provider mismatch: expected ${PROVIDER}, got ${plan.provider ?? "missing"}`);
   }
@@ -173,7 +186,28 @@ export async function prepareCalibration({
     throw new Error("Agent Lane requires the pinned Analysis Snapshot graph");
   }
 
-  await mkdir(resultRoot, { recursive: true });
+  if (!Array.isArray(manifest.included)) {
+    throw new Error("Agent Lane calibration requires the Analysis Corpus manifest");
+  }
+  const resultRoot = await initializeEmptyPilotOutput(
+    requestedResultRoot,
+    "Agent calibration output",
+  );
+  const materialRoot = await createMaterialRoot();
+  await mkdir(materialRoot, { recursive: true });
+  await Promise.all([
+    copyRegularFileWithin({
+      sourceRoot: inputs.graphDirectory,
+      relativePath: "knowledge-graph.json",
+      targetRoot: materialRoot,
+      targetPath: resolve(materialRoot, "knowledge-graph.json"),
+    }),
+    copyTrackedCorpus({
+      snapshotRoot: inputs.snapshotRoot,
+      included: manifest.included,
+      targetRoot: materialRoot,
+    }),
+  ]);
   const promptPath = resolve(resultRoot, "calibration-prompt.md");
   const schemaPath = resolve(resultRoot, "evidence-answer.schema.json");
   const protocolPath = resolve(resultRoot, "calibration-protocol.json");
@@ -184,12 +218,19 @@ export async function prepareCalibration({
     question: CALIBRATION_QUESTION,
     analysisSnapshot: ANALYSIS_SNAPSHOT,
     provider: PROVIDER,
-    graphPath,
+    graphPath: resolve(materialRoot, "knowledge-graph.json"),
     snapshotRoot: resolve(plan.snapshotCheckout),
+    materialRoot,
+    pilotArtifact: {
+      planSha256: inputs.planSha256,
+      manifestSha256: inputs.manifestSha256,
+      corpusDigestSha256: inputs.corpusDigestSha256,
+      graphSha256: inputs.graphSha256,
+    },
     preparedAt: now(),
     freshContext: {
       required: true,
-      mechanism: "codex exec --ephemeral --ignore-user-config",
+      mechanism: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       resumeOrForkAllowed: false,
     },
     timing: {
@@ -201,7 +242,11 @@ export async function prepareCalibration({
     expectedAnswersExposed: false,
   };
   await Promise.all([
-    writeFile(promptPath, buildPrompt({ graphPath, snapshotRoot: plan.snapshotCheckout }), "utf8"),
+    writeFile(
+      promptPath,
+      buildPrompt({ graphPath: "./knowledge-graph.json", snapshotRoot: "." }),
+      "utf8",
+    ),
     writeFile(schemaPath, `${JSON.stringify(ANSWER_SCHEMA, null, 2)}\n`, "utf8"),
     writeFile(protocolPath, `${JSON.stringify(protocol, null, 2)}\n`, "utf8"),
   ]);
@@ -210,15 +255,26 @@ export async function prepareCalibration({
     schemaPath,
     protocolPath,
     answerPath,
-    snapshotRoot: resolve(plan.snapshotCheckout),
+    outputDir: resultRoot,
+    snapshotRoot: materialRoot,
+    materialRoot,
+    pilotArtifact: protocol.pilotArtifact,
   };
 }
 
-export async function verifyEvidenceAnswer({ pilotArtifactRoot, answer, answerTimeMs }) {
-  const artifactRoot = resolve(pilotArtifactRoot);
-  const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"));
-  const manifest = await readJson(resolve(artifactRoot, "corpus-manifest.json"));
-  const graph = await readJson(graphPathFor(plan));
+export async function verifyEvidenceAnswer({
+  pilotArtifactRoot,
+  answer,
+  answerTimeMs,
+  loadPilotInputs = loadCurrentPilotArtifact,
+  pilotInputs,
+}) {
+  const artifactRoot = await requireApprovedPilotOutput(
+    pilotArtifactRoot,
+    "Agent calibration Pilot Artifact",
+  );
+  const inputs = pilotInputs ?? await loadPilotInputs(artifactRoot);
+  const { plan, manifest, graph } = inputs;
   if (plan.provider !== PROVIDER) throw new Error("Agent Lane provider policy changed");
   if (plan.analysisSnapshot !== ANALYSIS_SNAPSHOT || graph.project?.gitCommitHash !== ANALYSIS_SNAPSHOT) {
     throw new Error("Evidence Answer graph is not the pinned Analysis Snapshot");
@@ -239,7 +295,7 @@ export async function verifyEvidenceAnswer({ pilotArtifactRoot, answer, answerTi
   const relations = new Set((graph.edges ?? []).map(relationKey));
 
   for (const evidence of [...answer.codeEvidence, ...answer.testEvidence]) {
-    if (!included.has(evidence.path) || !(await isRegularFile(resolve(plan.snapshotCheckout, evidence.path)))) {
+    if (!included.has(evidence.path) || !(await isRegularFile(resolve(inputs.snapshotRoot, evidence.path)))) {
       throw new Error(`invented file evidence: ${evidence.path ?? "missing"}`);
     }
   }
@@ -274,7 +330,7 @@ export async function verifyEvidenceAnswer({ pilotArtifactRoot, answer, answerTi
   if (answer.graphNodeIds.length === 0) insufficiencies.push("graph node evidence is missing");
 
   for (const evidence of answer.codeEvidence) {
-    const source = await readFile(resolve(plan.snapshotCheckout, evidence.path), "utf8");
+    const source = await readFile(resolve(inputs.snapshotRoot, evidence.path), "utf8");
     const tokens = symbolTokens(evidence.symbol);
     if (tokens.length === 0 || tokens.some((token) => !source.includes(token))) {
       insufficiencies.push(`symbol not established in source: ${evidence.path}#${evidence.symbol}`);
@@ -284,7 +340,7 @@ export async function verifyEvidenceAnswer({ pilotArtifactRoot, answer, answerTi
     }
   }
   for (const evidence of answer.testEvidence) {
-    const source = await readFile(resolve(plan.snapshotCheckout, evidence.path), "utf8");
+    const source = await readFile(resolve(inputs.snapshotRoot, evidence.path), "utf8");
     if (!evidence.test || !source.includes(evidence.test)) {
       insufficiencies.push(`test not established in source: ${evidence.path}#${evidence.test}`);
     }
@@ -310,8 +366,17 @@ export async function runCalibration({
   outputDir,
   codexExecutable = "codex",
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  loadPilotInputs = loadCurrentPilotArtifact,
+  createMaterialRoot = () => createIsolatedMaterialRoot("ua-calibration-material-"),
 }) {
-  const prepared = await prepareCalibration({ pilotArtifactRoot, outputDir });
+  const prepared = await prepareCalibration({
+    pilotArtifactRoot,
+    outputDir,
+    loadPilotInputs,
+    createMaterialRoot,
+  });
+  await assertIsolatedMaterialRoot(prepared.materialRoot);
+  const resultRoot = prepared.outputDir;
   const prompt = await readFile(prepared.promptPath, "utf8");
   const args = buildCodexExecArgs({
     snapshotRoot: prepared.snapshotRoot,
@@ -320,15 +385,15 @@ export async function runCalibration({
   });
   const startedAt = new Date().toISOString();
   const start = performance.now();
-  const result = spawnSync(codexExecutable, args, {
-    input: prompt,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 32 * 1024 * 1024,
+  const result = spawnCodexChild({
+    executable: codexExecutable,
+    args,
+    prompt,
+    timeoutMs,
   });
   const answerTimeMs = Math.round((performance.now() - start) * 100) / 100;
   const finishedAt = new Date().toISOString();
-  const executionPath = resolve(outputDir, "calibration-execution.json");
+  const executionPath = resolve(resultRoot, "calibration-execution.json");
   if (result.status !== 0) {
     await writeFile(executionPath, `${JSON.stringify({
       status: "failed",
@@ -343,15 +408,29 @@ export async function runCalibration({
     throw new Error(`fresh Codex calibration failed with exit ${result.status ?? result.signal ?? "unknown"}`);
   }
   const answer = await readJson(prepared.answerPath);
-  const verification = await verifyEvidenceAnswer({ pilotArtifactRoot, answer, answerTimeMs });
+  const currentInputs = await loadPilotInputs(pilotArtifactRoot);
+  if (
+    prepared.pilotArtifact.planSha256 !== currentInputs.planSha256 ||
+    prepared.pilotArtifact.manifestSha256 !== currentInputs.manifestSha256 ||
+    prepared.pilotArtifact.corpusDigestSha256 !== currentInputs.corpusDigestSha256 ||
+    prepared.pilotArtifact.graphSha256 !== currentInputs.graphSha256
+  ) {
+    throw new Error("Pilot Artifact changed during Agent calibration");
+  }
+  const verification = await verifyEvidenceAnswer({
+    pilotArtifactRoot,
+    answer,
+    answerTimeMs,
+    pilotInputs: currentInputs,
+  });
   await Promise.all([
-    writeFile(resolve(outputDir, "calibration-answer.json"), `${JSON.stringify(answer, null, 2)}\n`, "utf8"),
-    writeFile(resolve(outputDir, "calibration-verification.json"), `${JSON.stringify(verification, null, 2)}\n`, "utf8"),
+    writeFile(resolve(resultRoot, "calibration-answer.json"), `${JSON.stringify(answer, null, 2)}\n`, "utf8"),
+    writeFile(resolve(resultRoot, "calibration-verification.json"), `${JSON.stringify(verification, null, 2)}\n`, "utf8"),
     writeFile(executionPath, `${JSON.stringify({
       status: "completed",
       provider: PROVIDER,
       freshContext: true,
-      invocation: "codex exec --ephemeral --ignore-user-config --sandbox read-only",
+      invocation: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       startedAt,
       finishedAt,
       answerTimeMs,
@@ -359,7 +438,7 @@ export async function runCalibration({
       scored: false,
     }, null, 2)}\n`, "utf8"),
   ]);
-  return { answer, verification, answerTimeMs, outputDir: resolve(outputDir) };
+  return { answer, verification, answerTimeMs, outputDir: resultRoot };
 }
 
 async function main() {
@@ -396,9 +475,13 @@ async function main() {
       answer,
       answerTimeMs: Number(options["answer-time-ms"]),
     });
-    await mkdir(outputDir, { recursive: true });
+    const verifiedOutputDir = await requireApprovedPilotOutput(
+      outputDir,
+      "Agent calibration verification output",
+    );
+    await mkdir(verifiedOutputDir, { recursive: true });
     await writeFile(
-      resolve(outputDir, "calibration-verification.json"),
+      resolve(verifiedOutputDir, "calibration-verification.json"),
       `${JSON.stringify(verification, null, 2)}\n`,
       "utf8",
     );

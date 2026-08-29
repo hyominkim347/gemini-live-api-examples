@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -7,16 +8,23 @@ import test from "node:test";
 import {
   buildArmPrompt,
   buildCodexExecArgs,
+  buildCrossedRuns,
   prepareAgentComparison,
+  validateComparisonPlanControls,
+  validateComparisonPlanSeal,
   verifyRawAnswer,
 } from "../scripts/agent-lane-comparison.mjs";
 
 const SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
 
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 async function fixture() {
   const root = await mkdtemp(resolve(tmpdir(), "ua-agent-comparison-"));
   const snapshotRoot = resolve(root, "snapshot");
-  const artifactRoot = resolve(root, "pilot-run");
+  const artifactRoot = resolve(root, ".ua-pilot", "pilot-run");
   const outputDir = resolve(root, ".ua-pilot", "agent-lane-comparison");
   const graphDir = resolve(snapshotRoot, ".ua");
   const codePath = "poc/kr-ja-meeting/src/example.mjs";
@@ -66,34 +74,78 @@ async function fixture() {
   };
 }
 
-test("prepare freezes the Impact Benchmark into a crossed Agent Lane Paired Comparison without scorer data", async () => {
-  const paths = await fixture();
-  const prepared = await prepareAgentComparison({
-    pilotArtifactRoot: paths.artifactRoot,
-    outputDir: paths.outputDir,
-    timeoutMs: 123_000,
-    now: () => "2026-08-30T00:00:00.000Z",
-  });
-  const planText = await readFile(prepared.planPath, "utf8");
-  const plan = JSON.parse(planText);
+test("the frozen twelve questions use the crossed Agent Lane order without scorer data", async () => {
+  const benchmark = JSON.parse(await readFile(
+    new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
+    "utf8",
+  ));
+  const questions = benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
+  const runs = buildCrossedRuns(questions, 123_000);
 
-  assert.equal(plan.scored, false);
-  assert.equal(plan.questions.length, 12);
-  assert.equal(plan.runs.length, 24);
-  assert.deepEqual(plan.runs.slice(0, 4).map(({ questionId, arm }) => [questionId, arm]), [
+  assert.equal(questions.length, 12);
+  assert.equal(runs.length, 24);
+  assert.deepEqual(runs.slice(0, 4).map(({ questionId, arm }) => [questionId, arm]), [
     ["direct-01", "understandAnythingGraph"],
     ["direct-01", "repositorySearchRg"],
     ["direct-02", "repositorySearchRg"],
     ["direct-02", "understandAnythingGraph"],
   ]);
-  assert.ok(plan.runs.every((run) => run.timeoutMs === 123_000));
-  assert.doesNotMatch(planText, /expectedAnswer|passGate|minimumCorrect|scorer/);
+  assert.ok(runs.every((run) => run.timeoutMs === 123_000));
+  assert.doesNotMatch(JSON.stringify({ questions, runs }), /expectedAnswer|passGate|minimumCorrect|scorer/);
+});
 
-  const graphMaterial = await readFile(resolve(prepared.graphMaterialRoot, "knowledge-graph.json"), "utf8");
-  const rgCode = await readFile(resolve(prepared.rgMaterialRoot, paths.codePath), "utf8");
-  assert.match(graphMaterial, /tested_by/);
-  assert.match(rgCode, /affectedBehavior/);
-  await assert.rejects(readFile(resolve(prepared.rgMaterialRoot, "benchmark.json"), "utf8"), /ENOENT/);
+test("prepared comparison controls reject a changed run path and plan bytes", async () => {
+  const benchmarkText = await readFile(
+    new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
+    "utf8",
+  );
+  const benchmark = JSON.parse(benchmarkText);
+  const questions = benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
+  const plan = {
+    contractVersion: 1,
+    scored: false,
+    lane: "agent",
+    provider: "current-codex-provider-only",
+    analysisSnapshot: SNAPSHOT,
+    benchmarkRevision: benchmark.revision,
+    benchmarkFrozenAt: benchmark.frozenAt,
+    benchmarkSha256: sha256(benchmarkText),
+    preparedAt: "2026-08-30T00:00:00.000Z",
+    timeoutMs: 600_000,
+    orderPolicy: "odd-graph-first-even-rg-first",
+    pilotArtifact: {
+      planSha256: "a".repeat(64),
+      manifestSha256: "b".repeat(64),
+      corpusDigestSha256: "c".repeat(64),
+      graphSha256: "d".repeat(64),
+    },
+    materialDigests: {
+      understandAnythingGraph: "e".repeat(64),
+      repositorySearchRg: "f".repeat(64),
+    },
+    questions,
+    runs: buildCrossedRuns(questions, 600_000),
+  };
+  validateComparisonPlanControls({ plan, benchmark, benchmarkText });
+  const unsafe = structuredClone(plan);
+  unsafe.runs[0].runId = "../escaped";
+  assert.throws(
+    () => validateComparisonPlanControls({ plan: unsafe, benchmark, benchmarkText }),
+    /invalid/,
+  );
+
+  const planText = `${JSON.stringify(plan, null, 2)}\n`;
+  const schemaText = "{}\n";
+  const sealText = JSON.stringify({
+    contractVersion: 1,
+    planSha256: sha256(planText),
+    schemaSha256: sha256(schemaText),
+  });
+  validateComparisonPlanSeal({ planText, sealText, schemaText });
+  assert.throws(
+    () => validateComparisonPlanSeal({ planText: `${planText} `, sealText, schemaText }),
+    /changed after prepare/,
+  );
 });
 
 test("each arm prompt contains only its question and material contract", () => {
@@ -117,14 +169,24 @@ test("fresh invocations use the current Codex provider, read-only sandbox, and n
     schemaPath: "/tmp/schema.json",
     answerPath: "/tmp/answer.json",
   });
-  assert.deepEqual(args, [
-    "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "--sandbox", "read-only",
-    "--cd", "/tmp/material", "--output-schema", "/tmp/schema.json",
-    "--output-last-message", "/tmp/answer.json", "-",
-  ]);
+  assert.equal(args.includes("--sandbox"), false);
+  assert.ok(args.some((value) => value.includes("default_permissions=\"ua_pilot_material_only\"")));
+  assert.ok(args.some((value) => value.includes('"/tmp/material"="read"')));
+  assert.ok(args.some((value) => value.includes("network={enabled=false}")));
   assert.equal(args.includes("resume"), false);
   assert.equal(args.includes("--oss"), false);
   assert.equal(args.includes("--local-provider"), false);
+});
+
+test("prepare rejects a self-asserted Pilot Artifact without current verification evidence", async () => {
+  const paths = await fixture();
+  await assert.rejects(
+    prepareAgentComparison({
+      pilotArtifactRoot: paths.artifactRoot,
+      outputDir: paths.outputDir,
+    }),
+    /prepare evidence|artifact verification|inventory verification|complete pinned|missing/i,
+  );
 });
 
 test("verification records grounded code, tests, relations, and measured time without a score", async () => {
