@@ -46,6 +46,10 @@ test("dynamic join, mic, speech, and leave payloads reach the service", async ()
       calls.push(["speech", event]);
       return { activeUtteranceId: "utterance-1" };
     },
+    listeningMode(participantId, mode) {
+      calls.push(["listening-mode", participantId, mode]);
+      return { listeningMode: mode };
+    },
     leave(participantId) {
       calls.push(["leave", participantId]);
       return { participants: [] };
@@ -74,6 +78,11 @@ test("dynamic join, mic, speech, and leave payloads reach the service", async ()
       observedAt: 100,
     }), { status: 200, body: { activeUtteranceId: "utterance-1" } });
 
+    assert.deepEqual(await post(baseUrl, "/api/meeting/listening-mode", {
+      participantId: "participant-1",
+      mode: "translation-only",
+    }), { status: 200, body: { listeningMode: "translation-only" } });
+
     assert.deepEqual(await post(baseUrl, "/api/meeting/leave", {
       participantId: "participant-1",
     }), { status: 200, body: { participants: [] } });
@@ -89,6 +98,7 @@ test("dynamic join, mic, speech, and leave payloads reach the service", async ()
       ["join", { name: "Yuki", language: "ja" }],
       ["mic", "participant-1", true],
       ["speech", { participantId: "participant-1", type: "speech-start", observedAt: 100 }],
+      ["listening-mode", "participant-1", "translation-only"],
       ["leave", "participant-1"],
     ]);
   });

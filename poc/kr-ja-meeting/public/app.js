@@ -8,14 +8,18 @@ const modeCopy = {
   silent: "연결 대기",
   speaking: "말하는 중",
   "translation-focused": "작은 원음 · 통역 음성 청취",
-  original: "원음 확인 중",
-  "original-until-boundary": "다음 발화부터 번역",
+  "translation-only": "통역 음성만 청취",
+  "original-check": "원음 확인 중 · 자동 복귀",
   "same-language-original": "같은 언어 원음",
 };
 
 const app = document.querySelector("#app");
 const audioOutput = document.querySelector("#audio-output");
-const audioPlayout = new BrowserAudioPlayout(audioOutput);
+const audioPlayout = new BrowserAudioPlayout(audioOutput, {
+  onPlanApplied(event) {
+    window.dispatchEvent(new CustomEvent("bridge:listening-plan-applied", { detail: event }));
+  },
+});
 let displayName = "";
 let preferredLanguage = "ko";
 let localParticipant = null;
@@ -124,17 +128,25 @@ function participantRow(state, active) {
   const isMe = state.id === localParticipant.id;
   return `<article class="person-row ${active?.id === state.id ? "is-speaking" : ""} ${isMe ? "is-me" : ""}" data-participant="${escapeHtml(state.id)}">
     ${avatar(state)}<div class="person-copy"><strong>${escapeHtml(state.name)}${isMe ? " · 나" : ""}</strong><span>${languageName[state.language]} · ${state.microphone === "unmuted" ? "마이크 켜짐" : "마이크 꺼짐"}</span></div>
-    ${trackPill(state.audio)}${isMe ? listenerActions(state.audio) : ""}
+    ${trackPill(state.audio)}${isMe ? listenerActions(state, active) : ""}
   </article>`;
 }
 
-function listenerActions(audio) {
-  const listenButton = audio.mode === "translation-focused"
-    ? `<button type="button" data-action="hold-original" ${busy ? "disabled" : ""}>원음 확인</button>`
-    : audio.mode === "original"
-      ? `<button type="button" data-action="release-original" ${busy ? "disabled" : ""}>번역으로 복귀</button>`
-      : "";
-  return listenButton ? `<div class="participant-actions">${listenButton}</div>` : "";
+function listenerActions(state, active) {
+  const mode = state.listeningMode ?? "translation-focused";
+  const persistentButton = mode === "translation-focused"
+    ? `<button type="button" data-listening-mode="translation-only" ${busy ? "disabled" : ""}>통역만</button>`
+    : mode === "translation-only"
+      ? `<button type="button" data-listening-mode="translation-focused" ${busy ? "disabled" : ""}>원음 작게 + 통역</button>`
+      : `<button type="button" disabled>원음 확인 중 · 자동 복귀</button>`;
+  const canCheckOriginal = active
+    && active.id !== state.id
+    && active.language !== state.language
+    && mode !== "original-check";
+  const originalButton = canCheckOriginal
+    ? `<button type="button" data-listening-mode="original-check" ${busy ? "disabled" : ""}>원음 확인</button>`
+    : "";
+  return `<div class="participant-actions">${persistentButton}${originalButton}</div>`;
 }
 
 function meetingControls() {
@@ -288,18 +300,20 @@ async function stopSpeechDetection() {
   speechDetectorResources = null;
 }
 
-async function performListenerAction(action) {
+async function changeListeningMode(mode) {
   if (!localParticipant || busy) return;
   busy = true;
   render();
   try {
-    snapshot = await postJson("/api/meeting/action", {
+    snapshot = await postJson("/api/meeting/listening-mode", {
       participantId: localParticipant.id,
-      action,
+      mode,
     });
-    statusMessage = action === "hold-original"
-      ? "번역을 끄고 원음만 확인합니다."
-      : "다음 자동 발화부터 번역으로 돌아갑니다.";
+    statusMessage = mode === "original-check"
+      ? "원음만 확인합니다. 이 발화가 끝나면 이전 청취 모드로 자동 복귀합니다."
+      : mode === "translation-only"
+        ? "다른 언어의 원음을 끄고 통역 음성만 듣습니다."
+        : "작은 원음과 통역 음성을 함께 듣습니다.";
     syncSubscriptions();
   } catch (error) {
     statusMessage = readableError(error);
@@ -416,8 +430,8 @@ document.addEventListener("click", (event) => {
   if (global === "join") return void joinMeeting();
   if (global === "leave") return void leaveMeeting();
   if (global === "mic") return void toggleMicrophone();
-  const action = event.target.closest("[data-action]")?.dataset.action;
-  if (action) void performListenerAction(action);
+  const listeningMode = event.target.closest("[data-listening-mode]")?.dataset.listeningMode;
+  if (listeningMode) void changeListeningMode(listeningMode);
 });
 
 window.addEventListener("beforeunload", () => {

@@ -132,6 +132,7 @@ test("microphone on remains unmuted and silent until speech activity starts", as
     microphone: "unmuted",
     speech: "silent",
     utteranceId: null,
+    listeningMode: "translation-focused",
     audio: { mode: "silent", tracks: [] },
   });
   assert.equal(state.activeSpeakerId, null);
@@ -243,6 +244,57 @@ test("invalid join and speech activity fail closed", async () => {
     service.speechActivity({ participantId: participant.id, type: "invented", observedAt: 1 }),
     /unsupported speech activity/,
   );
+});
+
+test("listening mode changes are participant-scoped and recorded once", async () => {
+  let participantSequence = 0;
+  const listeningEvents = [];
+  const { service } = createService({
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    onListeningEvent(event) { listeningEvents.push(event); },
+  });
+  const speaker = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const first = (await service.join({ name: "민준", language: "ko" })).participant;
+  const second = (await service.join({ name: "서연", language: "ko" })).participant;
+  await service.mic(speaker.id, true);
+  await service.speechActivity({ participantId: speaker.id, type: "speech-start", observedAt: 100 });
+
+  await service.listeningMode(first.id, "translation-only");
+  await service.listeningMode(first.id, "translation-only");
+  const checked = await service.listeningMode(first.id, "original-check");
+
+  assert.equal(checked.participants.find(({ id }) => id === first.id).audio.mode, "original-check");
+  assert.equal(checked.participants.find(({ id }) => id === second.id).audio.mode, "translation-focused");
+  assert.deepEqual(listeningEvents.map(({ type, participantId, previousMode, mode }) => ({
+    type, participantId, previousMode, mode,
+  })), [
+    {
+      type: "listening-mode-changed",
+      participantId: first.id,
+      previousMode: "translation-focused",
+      mode: "translation-only",
+    },
+    {
+      type: "listening-mode-changed",
+      participantId: first.id,
+      previousMode: "translation-only",
+      mode: "original-check",
+    },
+  ]);
+
+  const restored = await service.speechActivity({
+    participantId: speaker.id,
+    type: "speech-end",
+    observedAt: 200,
+  });
+  assert.equal(restored.participants.find(({ id }) => id === first.id).listeningMode, "translation-only");
+  assert.deepEqual(listeningEvents.at(-1), {
+    type: "listening-mode-restored",
+    participantId: first.id,
+    previousMode: "original-check",
+    mode: "translation-only",
+    utteranceId: "utterance-1",
+  });
 });
 
 test("automatic speech keeps its utterance id while an expired Gemini session retries", async () => {

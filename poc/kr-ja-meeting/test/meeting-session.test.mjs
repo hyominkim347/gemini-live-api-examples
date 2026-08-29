@@ -15,6 +15,7 @@ test("dynamic roster keeps microphone and speech as separate state", () => {
     microphone: "unmuted",
     speech: "silent",
     utteranceId: null,
+    listeningMode: "translation-focused",
     audio: { mode: "silent", tracks: [] },
   });
 
@@ -75,4 +76,48 @@ test("mic off ends speech but does not remove the participant", () => {
   assert.equal(session.activeSpeakerId, null);
   assert.equal(session.participants[0].microphone, "muted");
   assert.equal(session.participants[0].speech, "silent");
+});
+
+test("each listener keeps an independent persistent listening mode", () => {
+  const session = new MeetingSession([
+    { id: "ja-speaker", name: "Yuki", language: "ja" },
+    { id: "ko-one", name: "민준", language: "ko" },
+    { id: "ko-two", name: "서연", language: "ko" },
+  ]);
+  session.setMicrophone("ja-speaker", true);
+  session.startSpeech("ja-speaker", "utterance-1");
+
+  session.setListeningMode("ko-one", "translation-only");
+
+  assert.equal(session.audioPlanFor("ko-one").mode, "translation-only");
+  assert.deepEqual(session.audioPlanFor("ko-one").tracks, [
+    { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
+  ]);
+  assert.equal(session.audioPlanFor("ko-two").mode, "translation-focused");
+  assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-one").listeningMode, "translation-only");
+  assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-two").listeningMode, "translation-focused");
+});
+
+test("original-check restores the listener's previous mode at its automatic utterance boundary", () => {
+  const session = new MeetingSession([
+    { id: "ja-speaker", name: "Yuki", language: "ja" },
+    { id: "ko-listener", name: "민준", language: "ko" },
+  ]);
+  session.setMicrophone("ja-speaker", true);
+  session.startSpeech("ja-speaker", "utterance-1");
+  session.setListeningMode("ko-listener", "translation-only");
+
+  session.setListeningMode("ko-listener", "original-check");
+  assert.deepEqual(session.audioPlanFor("ko-listener"), {
+    mode: "original-check",
+    tracks: [
+      { trackId: "original:ja-speaker", kind: "original", role: "foreground", gain: 1 },
+    ],
+  });
+
+  session.endSpeech("ja-speaker");
+  assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-listener").listeningMode, "translation-only");
+
+  session.startSpeech("ja-speaker", "utterance-2");
+  assert.equal(session.audioPlanFor("ko-listener").mode, "translation-only");
 });

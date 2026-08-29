@@ -2,12 +2,16 @@ export class BrowserAudioPlayout {
   #container;
   #gainByTrackId = new Map();
   #entryByTrackId = new Map();
+  #onPlanApplied;
+  #planKey = null;
 
-  constructor(container) {
+  constructor(container, { onPlanApplied = () => {} } = {}) {
     if (!container || typeof container.append !== "function") {
       throw new Error("audio output container is required");
     }
+    if (typeof onPlanApplied !== "function") throw new Error("onPlanApplied must be a function");
     this.#container = container;
+    this.#onPlanApplied = onPlanApplied;
   }
 
   setPlan(listeningPlan) {
@@ -28,6 +32,20 @@ export class BrowserAudioPlayout {
     this.#gainByTrackId = nextGains;
     for (const [trackId, entry] of this.#entryByTrackId) {
       entry.element.volume = nextGains.get(trackId);
+    }
+    const event = {
+      type: "listening-plan-applied",
+      mode: listeningPlan?.mode ?? "silent",
+      tracks: tracks.map(({ trackId, kind, role, gain }) => ({ trackId, kind, role, gain })),
+    };
+    const planKey = JSON.stringify(event);
+    if (planKey !== this.#planKey) {
+      this.#planKey = planKey;
+      try {
+        this.#onPlanApplied(event);
+      } catch {
+        // Event hooks cannot interrupt browser audio playback.
+      }
     }
   }
 
@@ -62,6 +80,7 @@ export class BrowserAudioPlayout {
       this.#removeEntry(trackId, entry);
     }
     this.#gainByTrackId.clear();
+    this.#planKey = null;
   }
 
   #removeEntry(trackId, entry) {

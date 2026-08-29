@@ -1,11 +1,13 @@
 import { ListeningMixController } from "./listening-mix-controller.mjs";
 
 const SUPPORTED_LANGUAGES = new Set(["ko", "ja"]);
+const PERSISTENT_LISTENING_MODES = new Set(["translation-focused", "translation-only"]);
 
 export class MeetingSession {
   #participantById = new Map();
   #translationFocusId = null;
-  #listenerModes = new Map();
+  #persistentListeningModeById = new Map();
+  #originalCheckByListenerId = new Map();
   #listeningMixController = new ListeningMixController();
 
   constructor(participants = []) {
@@ -19,6 +21,7 @@ export class MeetingSession {
       microphone,
       speech,
       utteranceId,
+      listeningMode: this.listeningModeFor(participant.id),
     }));
   }
 
@@ -51,12 +54,14 @@ export class MeetingSession {
       speech: "silent",
       utteranceId: null,
     });
+    this.#persistentListeningModeById.set(participant.id, "translation-focused");
   }
 
   leave(participantId) {
     this.#requireParticipant(participantId);
     if (this.isSpeaking(participantId)) this.endSpeech(participantId);
-    this.#listenerModes.delete(participantId);
+    this.#persistentListeningModeById.delete(participantId);
+    this.#originalCheckByListenerId.delete(participantId);
     this.#participantById.delete(participantId);
   }
 
@@ -76,17 +81,17 @@ export class MeetingSession {
     participant.speech = "speaking";
     participant.utteranceId = utteranceId;
     if (!this.#translationFocusId) this.#translationFocusId = participantId;
-    this.#listenerModes.clear();
     return utteranceId;
   }
 
   endSpeech(participantId = this.#translationFocusId) {
     const participant = this.#requireParticipant(participantId);
     if (participant.speech !== "speaking") throw new Error(`${participantId} is not speaking`);
+    const utteranceId = participant.utteranceId;
     participant.speech = "silent";
     participant.utteranceId = null;
     if (this.#translationFocusId === participantId) this.#translationFocusId = null;
-    this.#listenerModes.clear();
+    return this.#restoreOriginalChecks(participantId, utteranceId);
   }
 
   setTranslationFocus(participantId) {
@@ -103,20 +108,37 @@ export class MeetingSession {
     return this.#requireParticipant(participantId).speech === "speaking";
   }
 
-  holdOriginal(listenerId) {
+  setListeningMode(listenerId, mode) {
     const listener = this.#requireParticipant(listenerId);
-    const speaker = this.#activeSpeaker();
-    if (listener.id === speaker.id || listener.language === speaker.language) {
-      throw new Error("original check is only available for foreign speech");
+    const previousMode = this.listeningModeFor(listenerId);
+    if (mode === "original-check") {
+      const speaker = this.#activeSpeaker();
+      if (listener.id === speaker.id || listener.language === speaker.language) {
+        throw new Error("original check is only available for foreign speech");
+      }
+      const current = this.#originalCheckByListenerId.get(listenerId);
+      if (current?.speakerId === speaker.id && current?.utteranceId === speaker.utteranceId) {
+        return { changed: false, previousMode, mode };
+      }
+      this.#originalCheckByListenerId.set(listenerId, {
+        returnMode: this.#persistentListeningModeById.get(listenerId),
+        speakerId: speaker.id,
+        utteranceId: speaker.utteranceId,
+      });
+      return { changed: previousMode !== mode, previousMode, mode };
     }
-    this.#listenerModes.set(listenerId, "original");
+
+    if (!PERSISTENT_LISTENING_MODES.has(mode)) throw new Error(`unsupported listening mode: ${mode}`);
+    this.#originalCheckByListenerId.delete(listenerId);
+    this.#persistentListeningModeById.set(listenerId, mode);
+    return { changed: previousMode !== mode, previousMode, mode };
   }
 
-  releaseOriginal(listenerId) {
-    if (this.#listenerModes.get(listenerId) !== "original") {
-      throw new Error(`${listenerId} is not checking original audio`);
-    }
-    this.#listenerModes.set(listenerId, "original-until-boundary");
+  listeningModeFor(listenerId) {
+    this.#requireParticipant(listenerId);
+    return this.#originalCheckByListenerId.has(listenerId)
+      ? "original-check"
+      : this.#persistentListeningModeById.get(listenerId);
   }
 
   audioPlanFor(listenerId) {
@@ -129,19 +151,11 @@ export class MeetingSession {
     if (listener.id === speaker.id) {
       return { mode: "speaking", tracks: [] };
     }
-    const requestedMode = this.#listenerModes.get(listenerId);
-    if (requestedMode) {
-      return {
-        mode: requestedMode,
-        tracks: [{
-          trackId: `original:${speaker.id}`,
-          kind: "original",
-          role: "foreground",
-          gain: 1,
-        }],
-      };
-    }
-    return this.#listeningMixController.planFor({ listener, speaker });
+    return this.#listeningMixController.planFor({
+      listener,
+      speaker,
+      mode: this.listeningModeFor(listenerId),
+    });
   }
 
   snapshot() {
@@ -171,6 +185,21 @@ export class MeetingSession {
   #activeSpeaker() {
     if (!this.#translationFocusId) throw new Error("no participant has translation focus");
     return this.#participantById.get(this.#translationFocusId);
+  }
+
+  #restoreOriginalChecks(speakerId, utteranceId) {
+    const restored = [];
+    for (const [listenerId, check] of this.#originalCheckByListenerId) {
+      if (check.speakerId !== speakerId || check.utteranceId !== utteranceId) continue;
+      this.#originalCheckByListenerId.delete(listenerId);
+      restored.push({
+        participantId: listenerId,
+        previousMode: "original-check",
+        mode: check.returnMode,
+        utteranceId,
+      });
+    }
+    return restored;
   }
 }
 

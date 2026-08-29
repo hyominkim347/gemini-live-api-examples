@@ -70,3 +70,43 @@ test("removing one track from the plan preserves the other audio element", () =>
   assert.deepEqual(children, [original.element]);
   assert.equal(original.element.volume, 1);
 });
+
+test("a changed gain plan emits one application event and repeated polling does not duplicate it", () => {
+  const { container } = fixture();
+  const events = [];
+  const playout = new BrowserAudioPlayout(container, {
+    onPlanApplied(event) { events.push(event); },
+  });
+  const plan = {
+    mode: "translation-only",
+    tracks: [
+      { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
+    ],
+  };
+
+  playout.setPlan(plan);
+  playout.setPlan(plan);
+
+  assert.deepEqual(events, [{
+    type: "listening-plan-applied",
+    mode: "translation-only",
+    tracks: [
+      { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
+    ],
+  }]);
+});
+
+test("a listening plan event hook cannot interrupt audio plan application", () => {
+  const { container, makeTrack } = fixture();
+  const playout = new BrowserAudioPlayout(container, {
+    onPlanApplied() { throw new Error("event sink unavailable"); },
+  });
+  const translation = makeTrack("translation:ko");
+
+  assert.doesNotThrow(() => playout.setPlan({
+    mode: "translation-only",
+    tracks: [{ trackId: translation.trackId, gain: 1 }],
+  }));
+  assert.equal(playout.attach(translation, { trackName: translation.trackId }), true);
+  assert.equal(translation.element.volume, 1);
+});
