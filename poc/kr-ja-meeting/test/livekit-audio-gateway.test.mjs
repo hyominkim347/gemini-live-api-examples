@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dispose } from "@livekit/rtc-node";
+import { dispose, RoomEvent } from "@livekit/rtc-node";
 
 import { LiveKitAudioGateway } from "../src/livekit-audio-gateway.mjs";
+import { MeetingEventRecorder } from "../src/meeting-event-recorder.mjs";
 import { sineFrame } from "../src/playout-continuity.mjs";
 
 test("translation sink exposes queue state and explicit playout lifecycle", async () => {
@@ -33,6 +34,58 @@ test("translation sink exposes queue state and explicit playout lifecycle", asyn
     assert.equal(sink.queuedDurationMs(), 0);
     sink.clearQueue();
     assert.equal(published.length, 1);
+  } finally {
+    await gateway.close();
+    dispose();
+  }
+});
+
+test("publish and disconnect cleanup use privacy-safe lifecycle events", async () => {
+  const events = [];
+  const handlers = new Map();
+  const recorder = new MeetingEventRecorder({
+    meetingId: "meeting-1",
+    clock: () => 900,
+    write(event) { events.push(event); },
+  });
+  const room = {
+    localParticipant: { async publishTrack() {} },
+    on(type, handler) { handlers.set(type, handler); },
+    off(type) { handlers.delete(type); },
+  };
+  const gateway = new LiveKitAudioGateway(room, { eventRecorder: recorder });
+
+  try {
+    await gateway.translationSink("ja");
+    handlers.get(RoomEvent.Disconnected)();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(events, [
+      {
+        type: "livekit-publish-started",
+        meetingId: "meeting-1",
+        language: "ja",
+        trackId: "translation:ja",
+        trackKind: "translation",
+        timestamp: 900,
+        result: "started",
+      },
+      {
+        type: "livekit-publish-succeeded",
+        meetingId: "meeting-1",
+        language: "ja",
+        trackId: "translation:ja",
+        trackKind: "translation",
+        timestamp: 900,
+        result: "succeeded",
+      },
+      {
+        type: "resources-closed",
+        meetingId: "meeting-1",
+        timestamp: 900,
+        result: "disconnected",
+      },
+    ]);
   } finally {
     await gateway.close();
     dispose();

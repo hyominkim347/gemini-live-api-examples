@@ -16,6 +16,10 @@ export class BrowserMeetingService {
   #session = new MeetingSession();
   #translationFocusPolicy;
   #onListeningEvent;
+  #eventRecorder;
+  #clock;
+  #overlapDetectedRecorded = false;
+  #listeningPlanKeyByParticipantId = new Map();
   #actionChain = Promise.resolve();
 
   constructor({
@@ -29,6 +33,7 @@ export class BrowserMeetingService {
     minimumFocusHoldMilliseconds,
     overlapWarningMilliseconds,
     onListeningEvent = () => {},
+    eventRecorder = { record() {} },
   }) {
     if (!roomName || !livekitUrl || !tokenIssuer || !translationBridge) {
       throw new Error("roomName, livekitUrl, tokenIssuer, and translationBridge are required");
@@ -39,13 +44,18 @@ export class BrowserMeetingService {
     this.#translationBridge = translationBridge;
     this.#participantIdFactory = participantIdFactory;
     this.#utteranceIdFactory = utteranceIdFactory;
+    this.#clock = clock;
     this.#translationFocusPolicy = new TranslationFocusPolicy({
       clock,
       minimumFocusHoldMilliseconds,
       overlapWarningMilliseconds,
     });
     if (typeof onListeningEvent !== "function") throw new Error("onListeningEvent must be a function");
+    if (!eventRecorder || typeof eventRecorder.record !== "function") {
+      throw new Error("eventRecorder.record must be a function");
+    }
     this.#onListeningEvent = onListeningEvent;
+    this.#eventRecorder = eventRecorder;
   }
 
   join({ name, language } = {}) {
@@ -53,12 +63,14 @@ export class BrowserMeetingService {
       const participant = this.#newParticipant(name, language);
       this.#session.join(participant);
       try {
-        return {
+        const joined = {
           livekitUrl: this.#livekitUrl,
           roomName: this.#roomName,
           token: await this.#tokenIssuer(participant),
           participant: { ...participant },
         };
+        this.#recordParticipant("meeting-joined", participant, { result: "joined" });
+        return joined;
       } catch (error) {
         this.#session.leave(participant.id);
         throw error;
@@ -68,7 +80,7 @@ export class BrowserMeetingService {
 
   leave(participantId) {
     return this.#enqueue(async () => {
-      this.#session.participant(participantId);
+      const participant = this.#session.participant(participantId);
       try {
         if (this.#session.isSpeaking(participantId)) {
           await this.#endSpeech(participantId, undefined);
@@ -76,6 +88,9 @@ export class BrowserMeetingService {
       } finally {
         this.#session.leave(participantId);
       }
+      this.#recordParticipant("meeting-left", participant, { result: "left" });
+      this.#recordParticipant("resources-closed", participant, { result: "closed" });
+      this.#listeningPlanKeyByParticipantId.delete(participantId);
       return this.snapshot();
     });
   }
@@ -83,7 +98,7 @@ export class BrowserMeetingService {
   mic(participantId, enabled) {
     return this.#enqueue(async () => {
       if (typeof enabled !== "boolean") throw new Error("microphone enabled must be a boolean");
-      this.#session.participant(participantId);
+      const participant = this.#session.participant(participantId);
       try {
         if (!enabled && this.#session.isSpeaking(participantId)) {
           await this.#endSpeech(participantId, undefined);
@@ -91,6 +106,9 @@ export class BrowserMeetingService {
       } finally {
         this.#session.setMicrophone(participantId, enabled);
       }
+      this.#recordParticipant(enabled ? "microphone-enabled" : "microphone-disabled", participant, {
+        result: enabled ? "enabled" : "disabled",
+      });
       return this.snapshot();
     });
   }
@@ -105,17 +123,29 @@ export class BrowserMeetingService {
       if (type === "speech-start") {
         if (this.#session.isSpeaking(participantId)) return this.snapshot();
         const utteranceId = this.#utteranceIdFactory();
+        const beforeFocus = this.#translationFocusPolicy.snapshot(observedAt);
         const previousFocusId = this.#session.translationFocusId;
         this.#session.startSpeech(participantId, utteranceId);
-        const focus = this.#translationFocusPolicy.speechStarted(participantId);
+        const focus = this.#translationFocusPolicy.speechStarted(participantId, observedAt);
         this.#session.setTranslationFocus(focus.translationFocusId);
         try {
           if (!previousFocusId) {
             await this.#translationBridge.start(participant, { utteranceId, observedAt });
           }
+          this.#recordParticipant("speech-started", participant, {
+            utteranceId,
+            result: "started",
+          });
+          this.#recordFocusTransition(beforeFocus, focus, participant, utteranceId);
+          this.#recordListeningPlans();
         } catch (error) {
           this.#session.endSpeech(participantId);
-          this.#translationFocusPolicy.speechEnded(participantId);
+          this.#translationFocusPolicy.speechEnded(participantId, observedAt);
+          this.#recordParticipant("utterance-aborted", participant, {
+            utteranceId,
+            result: "aborted",
+            errorCode: "translation-start-failed",
+          });
           throw error;
         }
       } else {
@@ -163,14 +193,29 @@ export class BrowserMeetingService {
   }
 
   async #endSpeech(participantId, observedAt) {
+    const participant = this.#session.participant(participantId);
+    const endedUtteranceId = this.#utteranceIdFor(participantId);
+    const eventAt = Number.isFinite(observedAt) ? observedAt : this.#clock();
+    const beforeFocus = this.#translationFocusPolicy.snapshot(eventAt);
     const wasFocused = this.#session.translationFocusId === participantId;
-    const previousUtteranceId = wasFocused ? this.#session.activeUtteranceId : null;
+    const previousUtteranceId = wasFocused ? endedUtteranceId : null;
     const restoredListeningModes = this.#session.endSpeech(participantId);
     for (const restored of restoredListeningModes) {
       this.#emitListeningEvent({ type: "listening-mode-restored", ...restored });
     }
-    const focus = this.#translationFocusPolicy.speechEnded(participantId);
-    if (!wasFocused) return;
+    const focus = this.#translationFocusPolicy.speechEnded(participantId, eventAt);
+    this.#recordParticipant("speech-ended", participant, {
+      utteranceId: endedUtteranceId,
+      result: "ended",
+    });
+    this.#recordFocusTransition(beforeFocus, focus, participant, endedUtteranceId);
+    if (!wasFocused) {
+      this.#recordParticipant("utterance-completed", participant, {
+        utteranceId: endedUtteranceId,
+        result: "completed-without-focus",
+      });
+      return;
+    }
     try {
       if (focus.translationFocusId) {
         const nextParticipant = this.#session.participant(focus.translationFocusId);
@@ -184,9 +229,19 @@ export class BrowserMeetingService {
       } else {
         await this.#translationBridge.stop({ utteranceId: previousUtteranceId, observedAt });
       }
+      this.#recordParticipant("utterance-completed", participant, {
+        utteranceId: previousUtteranceId,
+        result: "completed",
+      });
+      this.#recordListeningPlans();
     } catch (error) {
       this.#translationFocusPolicy.clearFocus();
       this.#session.setTranslationFocus(null);
+      this.#recordParticipant("utterance-aborted", participant, {
+        utteranceId: previousUtteranceId,
+        result: "aborted",
+        errorCode: "translation-cleanup-failed",
+      });
       throw error;
     }
   }
@@ -209,6 +264,89 @@ export class BrowserMeetingService {
   #emitListeningEvent(event) {
     try {
       this.#onListeningEvent(event);
+    } catch {
+      // Observability hooks cannot change the meeting contract.
+    }
+    const participant = this.#session.participant(event.participantId);
+    this.#recordParticipant(event.type, participant, {
+      utteranceId: event.utteranceId ?? this.#session.activeUtteranceId ?? undefined,
+      listeningMode: event.mode,
+      result: event.type === "listening-mode-restored" ? "restored" : "changed",
+    });
+    this.#recordListeningPlans();
+  }
+
+  #recordListeningPlans() {
+    const utteranceId = this.#session.activeUtteranceId ?? undefined;
+    for (const participant of this.#session.snapshot().participants) {
+      const planKey = JSON.stringify(participant.audio);
+      if (this.#listeningPlanKeyByParticipantId.get(participant.id) === planKey) continue;
+      this.#listeningPlanKeyByParticipantId.set(participant.id, planKey);
+      for (const track of participant.audio.tracks) {
+        this.#recordParticipant("listening-gain-applied", participant, {
+          utteranceId,
+          listeningMode: participant.audio.mode,
+          trackId: track.trackId,
+          trackKind: track.kind,
+          gain: track.gain,
+          result: "applied",
+        });
+      }
+    }
+  }
+
+  #recordFocusTransition(before, after, participant, utteranceId) {
+    if (!before.overlap.active && after.overlap.active) {
+      this.#recordParticipant("overlap-started", participant, { utteranceId, result: "active" });
+    }
+    if (before.overlap.detected && !this.#overlapDetectedRecorded) {
+      this.#overlapDetectedRecorded = true;
+      this.#recordParticipant("overlap-detected", participant, { utteranceId, result: "warning" });
+    } else if (after.overlap.detected && !this.#overlapDetectedRecorded) {
+      this.#overlapDetectedRecorded = true;
+      this.#recordParticipant("overlap-detected", participant, { utteranceId, result: "warning" });
+    }
+    if (before.overlap.active && !after.overlap.active) {
+      this.#recordParticipant("overlap-ended", participant, { utteranceId, result: "ended" });
+      this.#overlapDetectedRecorded = false;
+    }
+
+    if (before.translationFocusId === after.translationFocusId) return;
+    if (!before.translationFocusId && after.translationFocusId) {
+      const focused = this.#session.participant(after.translationFocusId);
+      this.#recordParticipant("translation-focus-selected", focused, {
+        utteranceId: this.#utteranceIdFor(after.translationFocusId),
+        result: "selected",
+      });
+      return;
+    }
+    if (after.translationFocusId) {
+      const focused = this.#session.participant(after.translationFocusId);
+      this.#recordParticipant("translation-focus-changed", focused, {
+        utteranceId: this.#utteranceIdFor(after.translationFocusId),
+        relatedParticipantId: before.translationFocusId,
+        result: "selected",
+      });
+      return;
+    }
+    this.#recordParticipant("translation-focus-cleared", participant, {
+      utteranceId,
+      result: "cleared",
+    });
+  }
+
+  #utteranceIdFor(participantId) {
+    return this.#session.participants.find(({ id }) => id === participantId)?.utteranceId;
+  }
+
+  #recordParticipant(type, participant, fields = {}) {
+    try {
+      this.#eventRecorder.record({
+        type,
+        participantId: participant.id,
+        language: participant.language,
+        ...fields,
+      });
     } catch {
       // Observability hooks cannot change the meeting contract.
     }

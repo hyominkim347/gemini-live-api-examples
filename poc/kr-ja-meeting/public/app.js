@@ -19,6 +19,9 @@ const audioPlayout = new BrowserAudioPlayout(audioOutput, {
   onPlanApplied(event) {
     window.dispatchEvent(new CustomEvent("bridge:listening-plan-applied", { detail: event }));
   },
+  onPlayoutEvent(event) {
+    window.dispatchEvent(new CustomEvent("bridge:playout", { detail: event }));
+  },
 });
 let displayName = "";
 let preferredLanguage = "ko";

@@ -4,6 +4,7 @@ export class LiveTranslationBridge {
   #geminiFactory;
   #drainQuietMilliseconds;
   #firstAudioTimeoutMilliseconds;
+  #eventRecorder;
   #active = null;
   #startingClient = null;
   #startPromise = null;
@@ -15,6 +16,7 @@ export class LiveTranslationBridge {
     geminiFactory,
     drainQuietMilliseconds = 750,
     firstAudioTimeoutMilliseconds = 5_000,
+    eventRecorder = { record() {} },
   }) {
     if (!meetingId || !audioGateway || !geminiFactory) {
       throw new Error("meetingId, audioGateway, and geminiFactory are required");
@@ -24,21 +26,25 @@ export class LiveTranslationBridge {
     this.#geminiFactory = geminiFactory;
     this.#drainQuietMilliseconds = drainQuietMilliseconds;
     this.#firstAudioTimeoutMilliseconds = firstAudioTimeoutMilliseconds;
+    if (!eventRecorder || typeof eventRecorder.record !== "function") {
+      throw new Error("eventRecorder.record must be a function");
+    }
+    this.#eventRecorder = eventRecorder;
   }
 
-  start(speaker) {
+  start(speaker, { utteranceId } = {}) {
     if (this.#active || this.#startPromise) {
       return Promise.reject(new Error("translation bridge is already active"));
     }
     const startRevision = this.#abortRevision;
-    const startPromise = this.#startSpeaker(speaker, startRevision);
+    const startPromise = this.#startSpeaker(speaker, utteranceId, startRevision);
     this.#startPromise = startPromise;
     return startPromise.finally(() => {
       if (this.#startPromise === startPromise) this.#startPromise = null;
     });
   }
 
-  async #startSpeaker(speaker, startRevision) {
+  async #startSpeaker(speaker, utteranceId, startRevision) {
     const targetLanguage = speaker.language === "ko" ? "ja" : "ko";
     let gemini;
     let originalSubscription;
@@ -47,9 +53,18 @@ export class LiveTranslationBridge {
     let audibleOutputReceived = false;
     let audibleInputReceived = false;
     let acceptingInput = true;
+    let inputRecorded = false;
+    let outputRecorded = false;
+    let setupSucceeded = false;
     let audioDrainGeneration = 0;
     const drainQuietMilliseconds = this.#drainQuietMilliseconds;
     const firstAudioTimeoutMilliseconds = this.#firstAudioTimeoutMilliseconds;
+    const context = {
+      participantId: speaker.id,
+      utteranceId,
+      language: speaker.language,
+    };
+    this.#record("gemini-setup-started", context, { result: "started" });
     try {
       const sink = await this.#audioGateway.translationSink(targetLanguage);
       this.#throwIfAborted(startRevision);
@@ -57,14 +72,22 @@ export class LiveTranslationBridge {
       gemini = this.#geminiFactory({
         meetingId: this.#meetingId,
         targetLanguage,
+        participantId: speaker.id,
+        utteranceId,
+        eventRecorder: this.#eventRecorder,
         onSetupComplete: setup.resolve,
         onClose() { setup.reject(new Error("Gemini closed during setup")); },
         onError: setup.reject,
-        onTranslatedAudio(base64Audio) {
+        onTranslatedAudio: (base64Audio) => {
           const pcm = Buffer.from(base64Audio, "base64");
           if (hasAudiblePcm(pcm)) {
             audibleOutputReceived = true;
             lastTranslatedAudioAt = Date.now();
+            if (!outputRecorded) {
+              outputRecorded = true;
+              this.#record("gemini-output-received", context, { result: "received" });
+              this.#record("playout-started", context, { result: "started" });
+            }
           }
           captureChain = captureChain.then(() => sink.capture(pcm));
           return captureChain;
@@ -74,23 +97,43 @@ export class LiveTranslationBridge {
 
       gemini.connect();
       await withTimeout(setup.promise, "Gemini setup", 20_000);
+      this.#record("gemini-setup-succeeded", context, { result: "succeeded" });
+      setupSucceeded = true;
       this.#throwIfAborted(startRevision);
       if (!gemini.sendActivityStart()) {
         throw new Error("Gemini activityStart was not sent");
       }
+      this.#record("gemini-input-started", context, { result: "started" });
 
-      originalSubscription = await this.#audioGateway.subscribeOriginal(
-        `original:${speaker.id}`,
-        (pcm, sampleRate) => {
+      this.#record("livekit-subscribe-started", context, { result: "started" });
+      try {
+        originalSubscription = await this.#audioGateway.subscribeOriginal(
+          `original:${speaker.id}`,
+          (pcm, sampleRate) => {
           if (!acceptingInput) return;
-          if (hasAudiblePcm(pcm)) audibleInputReceived = true;
+          if (hasAudiblePcm(pcm)) {
+            audibleInputReceived = true;
+            if (!inputRecorded) {
+              inputRecorded = true;
+              this.#record("gemini-input-received", context, { result: "received" });
+            }
+          }
           if (!gemini.sendPcm16(pcm, sampleRate)) {
             throw new Error("Gemini PCM frame was not sent");
           }
-        },
-      );
+          },
+        );
+        this.#record("livekit-subscribe-succeeded", context, { result: "succeeded" });
+      } catch (error) {
+        this.#record("livekit-subscribe-failed", context, {
+          result: "failed",
+          errorCode: "original-subscription-failed",
+        });
+        throw error;
+      }
       this.#throwIfAborted(startRevision);
       this.#active = {
+        context,
         gemini,
         originalSubscription,
         capture: () => captureChain,
@@ -124,11 +167,18 @@ export class LiveTranslationBridge {
         cancelAudioDrain() { audioDrainGeneration += 1; },
       };
     } catch (error) {
+      if (!setupSucceeded) {
+        this.#record("gemini-setup-failed", context, {
+          result: "failed",
+          errorCode: "setup-failed",
+        });
+      }
       if (originalSubscription) {
         await settle(originalSubscription.close());
       }
       gemini?.sendActivityEnd();
       gemini?.close();
+      this.#record("resources-closed", context, { result: "closed" });
       throw error;
     } finally {
       this.#startingClient = null;
@@ -174,6 +224,17 @@ export class LiveTranslationBridge {
     } finally {
       active.gemini.close();
       this.#active = null;
+      const playoutSucceeded = active.hasAudibleInput()
+        && results.slice(0, 2).every(({ status }) => status === "fulfilled");
+      this.#record(
+        playoutSucceeded ? "playout-completed" : "playout-aborted",
+        active.context,
+        {
+          result: playoutSucceeded ? "completed" : "aborted",
+          ...(playoutSucceeded ? {} : { errorCode: "playout-incomplete" }),
+        },
+      );
+      this.#record("resources-closed", active.context, { result: "closed" });
     }
     const failure = results.find(({ status }) => status === "rejected");
     if (failure) throw failure.reason;
@@ -209,6 +270,11 @@ export class LiveTranslationBridge {
       settle(active.capture()),
     ]);
     active.gemini.close();
+    this.#record("playout-aborted", active.context, {
+      result: "aborted",
+      errorCode: "translation-aborted",
+    });
+    this.#record("resources-closed", active.context, { result: "closed" });
     const failure = results.find(({ status }) => status === "rejected");
     if (failure) throw failure.reason;
   }
@@ -221,6 +287,14 @@ export class LiveTranslationBridge {
   #throwIfAborted(startRevision) {
     if (startRevision !== this.#abortRevision) {
       throw new Error("translation bridge start was aborted");
+    }
+  }
+
+  #record(type, context, fields) {
+    try {
+      this.#eventRecorder.record({ type, ...context, ...fields });
+    } catch {
+      // Observability hooks cannot change translation.
     }
   }
 }

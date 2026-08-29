@@ -3,15 +3,19 @@ export class BrowserAudioPlayout {
   #gainByTrackId = new Map();
   #entryByTrackId = new Map();
   #onPlanApplied;
+  #onPlayoutEvent;
+  #mode = "silent";
   #planKey = null;
 
-  constructor(container, { onPlanApplied = () => {} } = {}) {
+  constructor(container, { onPlanApplied = () => {}, onPlayoutEvent = () => {} } = {}) {
     if (!container || typeof container.append !== "function") {
       throw new Error("audio output container is required");
     }
     if (typeof onPlanApplied !== "function") throw new Error("onPlanApplied must be a function");
+    if (typeof onPlayoutEvent !== "function") throw new Error("onPlayoutEvent must be a function");
     this.#container = container;
     this.#onPlanApplied = onPlanApplied;
+    this.#onPlayoutEvent = onPlayoutEvent;
   }
 
   setPlan(listeningPlan) {
@@ -30,6 +34,7 @@ export class BrowserAudioPlayout {
       if (!nextGains.has(trackId)) this.#removeEntry(trackId, entry);
     }
     this.#gainByTrackId = nextGains;
+    this.#mode = listeningPlan?.mode ?? "silent";
     for (const [trackId, entry] of this.#entryByTrackId) {
       entry.element.volume = nextGains.get(trackId);
     }
@@ -66,6 +71,13 @@ export class BrowserAudioPlayout {
     element.dataset.trackId = trackId;
     this.#container.append(element);
     this.#entryByTrackId.set(trackId, { track, element });
+    this.#emitPlayout({
+      type: "playout-started",
+      trackId,
+      listeningMode: this.#mode,
+      gain: element.volume,
+      result: "started",
+    });
     return true;
   }
 
@@ -81,11 +93,27 @@ export class BrowserAudioPlayout {
     }
     this.#gainByTrackId.clear();
     this.#planKey = null;
+    this.#mode = "silent";
   }
 
   #removeEntry(trackId, entry) {
     for (const element of entry.track.detach()) element.remove();
     entry.element.remove();
     this.#entryByTrackId.delete(trackId);
+    this.#emitPlayout({
+      type: "playout-completed",
+      trackId,
+      listeningMode: this.#mode,
+      gain: entry.element.volume,
+      result: "detached",
+    });
+  }
+
+  #emitPlayout(event) {
+    try {
+      this.#onPlayoutEvent(event);
+    } catch {
+      // Event hooks cannot interrupt browser audio playback.
+    }
   }
 }
