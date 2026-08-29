@@ -248,6 +248,7 @@ test("an expired resumption handle is cleared and retried exactly once", () => {
 test("a successful retry records only privacy-safe lifecycle data", () => {
   const sockets = [];
   const serverEvents = [];
+  const timelineEvents = [];
   const handles = new MemoryResumptionHandleStore();
   handles.set("meeting-1", "ko", "secret-expired-handle");
   const client = new GeminiLiveTranslateSocket({
@@ -262,6 +263,7 @@ test("a successful retry records only privacy-safe lifecycle data", () => {
     },
     openState: FakeSocket.OPEN,
     onServerEvent(event) { serverEvents.push(event); },
+    eventRecorder: { record(event) { timelineEvents.push(event); } },
   });
 
   client.connect();
@@ -283,6 +285,14 @@ test("a successful retry records only privacy-safe lifecycle data", () => {
       meetingId: "meeting-1",
       targetLanguage: "ko",
     },
+  ]);
+  assert.deepEqual(timelineEvents.map(({ type, targetLanguage, language }) => ({
+    type,
+    targetLanguage,
+    language,
+  })), [
+    { type: "gemini-retry-started", targetLanguage: "ko", language: undefined },
+    { type: "gemini-retry-succeeded", targetLanguage: "ko", language: undefined },
   ]);
   const recorded = JSON.stringify(serverEvents);
   assert.equal(recorded.includes("secret-expired-handle"), false);

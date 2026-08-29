@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { BrowserAudioPlayout } from "../public/browser-audio-playout.mjs";
 
-function fixture() {
+function fixture({ play, attachError } = {}) {
   const children = [];
   const container = {
     append(element) {
@@ -14,6 +14,7 @@ function fixture() {
     const element = {
       dataset: {},
       volume: 1,
+      play,
       remove() {
         const index = children.indexOf(this);
         if (index >= 0) children.splice(index, 1);
@@ -21,7 +22,10 @@ function fixture() {
     };
     return {
       kind: "audio",
-      attach() { return element; },
+      attach() {
+        if (attachError) throw attachError;
+        return element;
+      },
       detach() { return [element]; },
       trackId,
       element,
@@ -111,8 +115,8 @@ test("a listening plan event hook cannot interrupt audio plan application", () =
   assert.equal(translation.element.volume, 1);
 });
 
-test("track attachment and detachment expose a browser playout lifecycle hook", () => {
-  const { container, makeTrack } = fixture();
+test("track attachment and detachment expose a browser playout lifecycle hook", async () => {
+  const { container, makeTrack } = fixture({ play: async () => {} });
   const events = [];
   const playout = new BrowserAudioPlayout(container, {
     onPlayoutEvent(event) { events.push(event); },
@@ -124,9 +128,17 @@ test("track attachment and detachment expose a browser playout lifecycle hook", 
   });
 
   playout.attach(translation, { trackName: translation.trackId });
+  await new Promise((resolve) => setImmediate(resolve));
   playout.detach(translation);
 
   assert.deepEqual(events, [
+    {
+      type: "playout-attached",
+      trackId: "translation:ko",
+      listeningMode: "translation-only",
+      gain: 1,
+      result: "attached",
+    },
     {
       type: "playout-started",
       trackId: "translation:ko",
@@ -142,4 +154,66 @@ test("track attachment and detachment expose a browser playout lifecycle hook", 
       result: "detached",
     },
   ]);
+});
+
+test("browser play rejection reports a privacy-safe playout failure instead of a start", async () => {
+  const { container, makeTrack } = fixture({
+    play: async () => { throw new Error("private device details"); },
+  });
+  const events = [];
+  const playout = new BrowserAudioPlayout(container, {
+    onPlayoutEvent(event) { events.push(event); },
+  });
+  const translation = makeTrack("translation:ko");
+  playout.setPlan({
+    mode: "translation-only",
+    tracks: [{ trackId: translation.trackId, gain: 1 }],
+  });
+
+  playout.attach(translation, { trackName: translation.trackId });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(events, [
+    {
+      type: "playout-attached",
+      trackId: "translation:ko",
+      listeningMode: "translation-only",
+      gain: 1,
+      result: "attached",
+    },
+    {
+      type: "playout-aborted",
+      trackId: "translation:ko",
+      listeningMode: "translation-only",
+      gain: 1,
+      result: "failed",
+      errorCode: "browser-play-failed",
+    },
+  ]);
+  assert.equal(JSON.stringify(events).includes("private device details"), false);
+});
+
+test("synchronous browser attachment and play failures are reported without error details", async () => {
+  for (const [failure, fixtureOptions, errorCode, expectedTypes] of [
+    ["attach", { attachError: new Error("private attach details") }, "browser-attach-failed", ["playout-aborted"]],
+    ["play", { play() { throw new Error("private play details"); } }, "browser-play-failed", ["playout-attached", "playout-aborted"]],
+  ]) {
+    const { container, makeTrack } = fixture(fixtureOptions);
+    const events = [];
+    const playout = new BrowserAudioPlayout(container, {
+      onPlayoutEvent(event) { events.push(event); },
+    });
+    const translation = makeTrack("translation:ko");
+    playout.setPlan({
+      mode: "translation-only",
+      tracks: [{ trackId: translation.trackId, gain: 1 }],
+    });
+
+    assert.equal(playout.attach(translation, { trackName: translation.trackId }), failure !== "attach");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(events.map(({ type }) => type), expectedTypes);
+    assert.equal(events.at(-1).errorCode, errorCode);
+    assert.equal(JSON.stringify(events).includes("private"), false);
+  }
 });

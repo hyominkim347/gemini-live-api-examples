@@ -66,18 +66,67 @@ export class BrowserAudioPlayout {
     }
     if (existing) this.#removeEntry(trackId, existing);
 
-    const element = track.attach();
+    let element;
+    try {
+      element = track.attach();
+    } catch {
+      this.#emitPlayout({
+        type: "playout-aborted",
+        trackId,
+        listeningMode: this.#mode,
+        gain: this.#gainByTrackId.get(trackId),
+        result: "failed",
+        errorCode: "browser-attach-failed",
+      });
+      return false;
+    }
     element.volume = this.#gainByTrackId.get(trackId);
     element.dataset.trackId = trackId;
     this.#container.append(element);
     this.#entryByTrackId.set(trackId, { track, element });
     this.#emitPlayout({
-      type: "playout-started",
+      type: "playout-attached",
       trackId,
       listeningMode: this.#mode,
       gain: element.volume,
-      result: "started",
+      result: "attached",
     });
+    if (typeof element.play === "function") {
+      let playResult;
+      try {
+        playResult = element.play();
+      } catch {
+        this.#emitPlayout({
+          type: "playout-aborted",
+          trackId,
+          listeningMode: this.#mode,
+          gain: element.volume,
+          result: "failed",
+          errorCode: "browser-play-failed",
+        });
+        return true;
+      }
+      Promise.resolve(playResult).then(() => {
+        if (this.#entryByTrackId.get(trackId)?.element !== element) return;
+        this.#emitPlayout({
+          type: "playout-started",
+          trackId,
+          listeningMode: this.#mode,
+          gain: element.volume,
+          result: "started",
+        });
+      }, () => {
+        if (this.#entryByTrackId.get(trackId)?.element !== element) return;
+        this.#emitPlayout({
+          type: "playout-aborted",
+          trackId,
+          listeningMode: this.#mode,
+          gain: element.volume,
+          result: "failed",
+          errorCode: "browser-play-failed",
+        });
+      });
+    }
     return true;
   }
 

@@ -147,13 +147,13 @@ export class MeetingSession {
       return { mode: "silent", tracks: [] };
     }
 
-    const speaker = this.#activeSpeaker();
-    if (listener.id === speaker.id) {
-      return { mode: "speaking", tracks: [] };
-    }
+    const focusSpeaker = this.#activeSpeaker();
+    const speakers = [...this.#participantById.values()]
+      .filter(({ speech }) => speech === "speaking");
     return this.#listeningMixController.planFor({
       listener,
-      speaker,
+      speakers,
+      focusSpeaker,
       mode: this.listeningModeFor(listenerId),
     });
   }

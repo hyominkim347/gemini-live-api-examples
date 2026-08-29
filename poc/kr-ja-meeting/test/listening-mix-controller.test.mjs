@@ -8,7 +8,8 @@ const controller = new ListeningMixController();
 test("same-language speech is one foreground original track", () => {
   assert.deepEqual(controller.planFor({
     listener: { id: "ja-listener", language: "ja" },
-    speaker: { id: "ja-speaker", language: "ja" },
+    speakers: [{ id: "ja-speaker", language: "ja" }],
+    focusSpeaker: { id: "ja-speaker", language: "ja" },
   }), {
     mode: "same-language-original",
     tracks: [
@@ -20,7 +21,8 @@ test("same-language speech is one foreground original track", () => {
 test("foreign speech keeps original quieter than the foreground translation", () => {
   const plan = controller.planFor({
     listener: { id: "ko-listener", language: "ko" },
-    speaker: { id: "ja-speaker", language: "ja" },
+    speakers: [{ id: "ja-speaker", language: "ja" }],
+    focusSpeaker: { id: "ja-speaker", language: "ja" },
   });
 
   assert.equal(plan.mode, "translation-focused");
@@ -39,13 +41,13 @@ test("foreign speech can use translation-only or temporary original-check plans"
   const listener = { id: "ko-listener", language: "ko" };
   const speaker = { id: "ja-speaker", language: "ja" };
 
-  assert.deepEqual(controller.planFor({ listener, speaker, mode: "translation-only" }), {
+  assert.deepEqual(controller.planFor({ listener, speakers: [speaker], focusSpeaker: speaker, mode: "translation-only" }), {
     mode: "translation-only",
     tracks: [
       { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
     ],
   });
-  assert.deepEqual(controller.planFor({ listener, speaker, mode: "original-check" }), {
+  assert.deepEqual(controller.planFor({ listener, speakers: [speaker], focusSpeaker: speaker, mode: "original-check" }), {
     mode: "original-check",
     tracks: [
       { trackId: "original:ja-speaker", kind: "original", role: "foreground", gain: 1 },

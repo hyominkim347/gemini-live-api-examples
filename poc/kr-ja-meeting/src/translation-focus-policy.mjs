@@ -1,25 +1,22 @@
-const DEFAULT_MINIMUM_FOCUS_HOLD_MILLISECONDS = 750;
 const DEFAULT_OVERLAP_WARNING_MILLISECONDS = 1_500;
 
 export class TranslationFocusPolicy {
   #clock;
-  #minimumFocusHoldMilliseconds;
   #overlapWarningMilliseconds;
   #speaking = new Map();
   #translationFocusId = null;
   #focusSelectedAt = null;
   #overlapStartedAt = null;
+  #overlapDetectedAt = null;
+  #pendingTransitions = [];
 
   constructor({
     clock = () => Date.now(),
-    minimumFocusHoldMilliseconds = DEFAULT_MINIMUM_FOCUS_HOLD_MILLISECONDS,
     overlapWarningMilliseconds = DEFAULT_OVERLAP_WARNING_MILLISECONDS,
   } = {}) {
     if (typeof clock !== "function") throw new Error("translation focus clock is required");
-    validateDuration(minimumFocusHoldMilliseconds, "minimum focus hold");
     validateDuration(overlapWarningMilliseconds, "overlap warning");
     this.#clock = clock;
-    this.#minimumFocusHoldMilliseconds = minimumFocusHoldMilliseconds;
     this.#overlapWarningMilliseconds = overlapWarningMilliseconds;
   }
 
@@ -28,7 +25,10 @@ export class TranslationFocusPolicy {
     validateTimestamp(observedAt);
     if (this.#speaking.has(participantId)) return this.snapshot(observedAt);
     this.#speaking.set(participantId, observedAt);
-    if (this.#speaking.size === 2) this.#overlapStartedAt = observedAt;
+    if (this.#speaking.size === 2) {
+      this.#overlapStartedAt = observedAt;
+      this.#overlapDetectedAt = null;
+    }
     if (!this.#translationFocusId) this.#selectFocus(participantId, observedAt);
     return this.snapshot(observedAt);
   }
@@ -37,7 +37,10 @@ export class TranslationFocusPolicy {
     validateParticipantId(participantId);
     validateTimestamp(observedAt);
     if (!this.#speaking.delete(participantId)) return this.snapshot(observedAt);
-    if (this.#speaking.size < 2) this.#overlapStartedAt = null;
+    if (this.#speaking.size < 2) {
+      this.#overlapStartedAt = null;
+      this.#overlapDetectedAt = null;
+    }
     if (this.#translationFocusId === participantId) {
       const nextParticipantId = this.#speaking.keys().next().value ?? null;
       this.#translationFocusId = null;
@@ -52,24 +55,39 @@ export class TranslationFocusPolicy {
     this.#focusSelectedAt = null;
   }
 
+  takeTransitions() {
+    const transitions = this.#pendingTransitions;
+    this.#pendingTransitions = [];
+    return transitions;
+  }
+
   snapshot(observedAt = this.#clock()) {
     validateTimestamp(observedAt);
     const speakingParticipantIds = [...this.#speaking.keys()];
     const overlapActive = speakingParticipantIds.length > 1;
-    const overlapDetected = overlapActive
-      && observedAt - this.#overlapStartedAt >= this.#overlapWarningMilliseconds;
+    if (
+      overlapActive
+      && this.#overlapDetectedAt === null
+      && observedAt - this.#overlapStartedAt >= this.#overlapWarningMilliseconds
+    ) {
+      this.#overlapDetectedAt = this.#overlapStartedAt + this.#overlapWarningMilliseconds;
+      this.#pendingTransitions.push({
+        type: "overlap-detected",
+        observedAt: this.#overlapDetectedAt,
+        participantIds: speakingParticipantIds,
+      });
+    }
+    const overlapDetected = overlapActive && this.#overlapDetectedAt !== null;
     return {
       speakingParticipantIds,
       translationFocusId: this.#translationFocusId,
       focusSelectedAt: this.#focusSelectedAt,
-      focusProtectedUntil: this.#focusSelectedAt === null
-        ? null
-        : this.#focusSelectedAt + this.#minimumFocusHoldMilliseconds,
       overlap: {
         active: overlapActive,
         detected: overlapDetected,
         participantIds: overlapActive ? speakingParticipantIds : [],
         startedAt: overlapActive ? this.#overlapStartedAt : null,
+        detectedAt: overlapDetected ? this.#overlapDetectedAt : null,
         message: overlapDetected
           ? "동시에 말하고 있어 일부 통역이 불완전할 수 있습니다."
           : null,

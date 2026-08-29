@@ -59,7 +59,6 @@ test("overlapping speech stays published while one translation focus hands off",
     participantIdFactory: () => `participant-${++participantSequence}`,
     utteranceIdFactory: () => `utterance-${++utteranceSequence}`,
     clock: () => now,
-    minimumFocusHoldMilliseconds: 500,
     overlapWarningMilliseconds: 1_000,
   });
   const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
@@ -105,6 +104,28 @@ test("overlapping speech stays published while one translation focus hands off",
   ]);
 });
 
+test("browser-relative speech timestamps cannot trigger a server-clock overlap warning", async () => {
+  let now = 1_000_000;
+  let participantSequence = 0;
+  const { service } = createService({
+    clock: () => now,
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    overlapWarningMilliseconds: 1_000,
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "Sora", language: "ja" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 10 });
+  now = 1_000_100;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 20 });
+
+  assert.equal(service.snapshot().overlap.detected, false);
+  now = 1_001_100;
+  assert.equal(service.snapshot().overlap.detected, true);
+});
+
 test("dynamic participant joins with a generated id and can leave", async () => {
   const { service } = createService();
 
@@ -141,7 +162,8 @@ test("microphone on remains unmuted and silent until speech activity starts", as
 });
 
 test("speech start and end drive one translation lifecycle with one utterance id", async () => {
-  const { service, bridgeEvents } = createService();
+  let now = 100;
+  const { service, bridgeEvents } = createService({ clock: () => now });
   const { participant } = await service.join({ name: "Yuki", language: "ja" });
   await service.mic(participant.id, true);
 
@@ -154,6 +176,7 @@ test("speech start and end drive one translation lifecycle with one utterance id
   assert.equal(speaking.activeUtteranceId, "utterance-1");
   assert.equal(speaking.participants[0].speech, "speaking");
 
+  now = 350;
   const silent = await service.speechActivity({
     participantId: participant.id,
     type: "speech-end",

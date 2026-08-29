@@ -50,6 +50,10 @@ test("dynamic join, mic, speech, and leave payloads reach the service", async ()
       calls.push(["listening-mode", participantId, mode]);
       return { listeningMode: mode };
     },
+    playout(participantId, event) {
+      calls.push(["playout", participantId, event]);
+      return { recorded: true };
+    },
     leave(participantId) {
       calls.push(["leave", participantId]);
       return { participants: [] };
@@ -83,6 +87,16 @@ test("dynamic join, mic, speech, and leave payloads reach the service", async ()
       mode: "translation-only",
     }), { status: 200, body: { listeningMode: "translation-only" } });
 
+    assert.deepEqual(await post(baseUrl, "/api/meeting/playout", {
+      participantId: "participant-1",
+      type: "playout-aborted",
+      trackId: "translation:ja",
+      listeningMode: "translation-only",
+      gain: 1,
+      result: "failed",
+      errorCode: "browser-play-failed",
+    }), { status: 200, body: { recorded: true } });
+
     assert.deepEqual(await post(baseUrl, "/api/meeting/leave", {
       participantId: "participant-1",
     }), { status: 200, body: { participants: [] } });
@@ -99,6 +113,14 @@ test("dynamic join, mic, speech, and leave payloads reach the service", async ()
       ["mic", "participant-1", true],
       ["speech", { participantId: "participant-1", type: "speech-start", observedAt: 100 }],
       ["listening-mode", "participant-1", "translation-only"],
+      ["playout", "participant-1", {
+        type: "playout-aborted",
+        trackId: "translation:ja",
+        listeningMode: "translation-only",
+        gain: 1,
+        result: "failed",
+        errorCode: "browser-play-failed",
+      }],
       ["leave", "participant-1"],
     ]);
   });

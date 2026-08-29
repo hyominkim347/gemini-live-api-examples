@@ -7,7 +7,6 @@ test("first speaker keeps focus through a short overlap and hands off after endi
   let now = 0;
   const policy = new TranslationFocusPolicy({
     clock: () => now,
-    minimumFocusHoldMilliseconds: 500,
     overlapWarningMilliseconds: 1_000,
   });
 
@@ -20,12 +19,12 @@ test("first speaker keeps focus through a short overlap and hands off after endi
     speakingParticipantIds: ["ja-1", "ko-1"],
     translationFocusId: "ja-1",
     focusSelectedAt: 0,
-    focusProtectedUntil: 500,
     overlap: {
       active: true,
       detected: false,
       participantIds: ["ja-1", "ko-1"],
       startedAt: 100,
+      detectedAt: null,
       message: null,
     },
   });
@@ -52,6 +51,7 @@ test("long overlap becomes a warning without removing either speaker", () => {
     detected: true,
     participantIds: ["ja-1", "ko-1"],
     startedAt: 30,
+    detectedAt: 1_030,
     message: "동시에 말하고 있어 일부 통역이 불완전할 수 있습니다.",
   });
 });
