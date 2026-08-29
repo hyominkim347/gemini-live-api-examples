@@ -28,6 +28,7 @@ export class BrowserMeetingService {
   #clock;
   #listeningPlanKeyByParticipantId = new Map();
   #issuedPlayoutContextByParticipantId = new Map();
+  #translationStartLockouts = new Set();
   #actionChain = Promise.resolve();
 
   constructor({
@@ -194,18 +195,26 @@ export class BrowserMeetingService {
       if (beforeFocus.translationFocusId !== focus.translationFocusId) {
         const participant = this.#session.participant(focus.translationFocusId);
         const utteranceId = this.#utteranceIdFor(participant.id);
+        const lockoutKey = this.#translationStartLockoutKey(participant.id, utteranceId);
+        if (this.#translationStartLockouts.has(lockoutKey)) {
+          this.#translationFocusPolicy.clearFocus();
+          this.#session.setTranslationFocus(null);
+          return this.snapshot();
+        }
         try {
           await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
+          this.#translationStartLockouts.delete(lockoutKey);
           this.#session.setTranslationFocus(participant.id);
           this.#recordFocusTransition(beforeFocus, focus, participant, utteranceId);
           this.#recordListeningPlans();
         } catch (error) {
+          this.#translationStartLockouts.add(lockoutKey);
           this.#translationFocusPolicy.clearFocus();
           this.#session.setTranslationFocus(null);
           this.#recordParticipant("utterance-aborted", participant, {
             utteranceId,
             result: "aborted",
-            errorCode: "translation-start-failed",
+            errorCode: "translation-recovery-unavailable",
           });
           throw error;
         }
@@ -230,6 +239,9 @@ export class BrowserMeetingService {
       const contexts = this.#issuedPlayoutContextByParticipantId.get(participantId);
       const context = contexts?.get(key);
       if (!context) throw new Error("playout utteranceId does not match an issued listening plan");
+      if (context.status === "superseded" && !["playout-completed", "playout-aborted"].includes(event.type)) {
+        throw new Error("playout utterance context is superseded");
+      }
       const outcome = playoutOutcome(event);
       this.#recordParticipant(event.type, participant, {
         utteranceId: context.utteranceId,
@@ -270,6 +282,9 @@ export class BrowserMeetingService {
   async #endSpeech(participantId, observedAt) {
     const participant = this.#session.participant(participantId);
     const endedUtteranceId = this.#utteranceIdFor(participantId);
+    this.#translationStartLockouts.delete(
+      this.#translationStartLockoutKey(participantId, endedUtteranceId),
+    );
     const eventAt = Number.isFinite(observedAt) ? observedAt : this.#eventTimestamp();
     const beforeFocus = this.#translationFocusPolicy.snapshot(eventAt);
     const wasFocused = this.#session.translationFocusId === participantId;
@@ -407,6 +422,10 @@ export class BrowserMeetingService {
     return this.#session.participants.find(({ id }) => id === participantId)?.utteranceId;
   }
 
+  #translationStartLockoutKey(participantId, utteranceId) {
+    return `${participantId}:${utteranceId}`;
+  }
+
   #recordParticipant(type, participant, fields = {}) {
     try {
       this.#eventRecorder.record({
@@ -442,16 +461,26 @@ export class BrowserMeetingService {
       }
       for (const track of participant.audio.tracks) {
         if (!track.utteranceId) continue;
+        const key = `${track.trackId}:${track.utteranceId}`;
+        const current = contexts.get(key);
+        if (!current) {
+          for (const [issuedKey, issued] of contexts) {
+            if (issued.trackId !== track.trackId) continue;
+            if (issued.status === "superseded") contexts.delete(issuedKey);
+            else issued.status = "superseded";
+          }
+        }
         const targetLanguage = track.kind === "translation"
           ? track.trackId.slice("translation:".length)
           : participant.language;
-        contexts.set(`${track.trackId}:${track.utteranceId}`, {
+        contexts.set(key, {
           utteranceId: track.utteranceId,
           targetLanguage,
           listeningMode: participant.audio.mode,
           trackId: track.trackId,
           trackKind: track.kind,
           gain: track.gain,
+          status: "current",
         });
       }
     }
@@ -471,7 +500,8 @@ function playoutOutcome(event) {
     return { result: "interrupted", errorCode: "browser-playout-gap" };
   }
   if (event.type === "playout-completed") {
-    return { result: event.result === "ended" ? "ended" : "detached" };
+    const allowedResults = new Set(["ended", "detached", "superseded"]);
+    return { result: allowedResults.has(event.result) ? event.result : "detached" };
   }
   const allowedErrorCodes = new Set(["browser-attach-failed", "browser-play-failed"]);
   return {
