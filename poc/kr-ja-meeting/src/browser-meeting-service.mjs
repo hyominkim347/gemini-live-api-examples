@@ -208,14 +208,7 @@ export class BrowserMeetingService {
           this.#recordFocusTransition(beforeFocus, focus, participant, utteranceId);
           this.#recordListeningPlans();
         } catch (error) {
-          this.#translationStartLockouts.add(lockoutKey);
-          this.#translationFocusPolicy.clearFocus();
-          this.#session.setTranslationFocus(null);
-          this.#recordParticipant("utterance-aborted", participant, {
-            utteranceId,
-            result: "aborted",
-            errorCode: "translation-recovery-unavailable",
-          });
+          this.#lockOutTranslationStart(participant, utteranceId);
           throw error;
         }
       }
@@ -306,10 +299,12 @@ export class BrowserMeetingService {
       });
       return;
     }
+    let handoffTarget = null;
     try {
       if (focus.translationFocusId) {
         const nextParticipant = this.#session.participant(focus.translationFocusId);
         const nextState = this.#session.participants.find(({ id }) => id === focus.translationFocusId);
+        handoffTarget = { participant: nextParticipant, utteranceId: nextState.utteranceId };
         await this.#translationBridge.handoff(nextParticipant, {
           previousUtteranceId,
           utteranceId: nextState.utteranceId,
@@ -325,8 +320,12 @@ export class BrowserMeetingService {
       });
       this.#recordListeningPlans();
     } catch (error) {
-      this.#translationFocusPolicy.clearFocus();
-      this.#session.setTranslationFocus(null);
+      if (handoffTarget) {
+        this.#lockOutTranslationStart(handoffTarget.participant, handoffTarget.utteranceId);
+      } else {
+        this.#translationFocusPolicy.clearFocus();
+        this.#session.setTranslationFocus(null);
+      }
       this.#recordParticipant("utterance-aborted", participant, {
         utteranceId: previousUtteranceId,
         result: "aborted",
@@ -424,6 +423,20 @@ export class BrowserMeetingService {
 
   #translationStartLockoutKey(participantId, utteranceId) {
     return `${participantId}:${utteranceId}`;
+  }
+
+  #lockOutTranslationStart(participant, utteranceId) {
+    const key = this.#translationStartLockoutKey(participant.id, utteranceId);
+    const newlyLocked = !this.#translationStartLockouts.has(key);
+    this.#translationStartLockouts.add(key);
+    this.#translationFocusPolicy.clearFocus();
+    this.#session.setTranslationFocus(null);
+    if (!newlyLocked) return;
+    this.#recordParticipant("utterance-aborted", participant, {
+      utteranceId,
+      result: "aborted",
+      errorCode: "translation-recovery-unavailable",
+    });
   }
 
   #recordParticipant(type, participant, fields = {}) {
