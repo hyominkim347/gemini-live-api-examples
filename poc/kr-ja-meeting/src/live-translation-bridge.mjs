@@ -6,6 +6,7 @@ export class LiveTranslationBridge {
   #geminiFactory;
   #drainQuietMilliseconds;
   #firstAudioTimeoutMilliseconds;
+  #captureCleanupTimeoutMilliseconds;
   #continuousInput;
   #preRollMilliseconds;
   #replacementBufferMilliseconds;
@@ -29,6 +30,7 @@ export class LiveTranslationBridge {
     geminiFactory,
     drainQuietMilliseconds = 1_500,
     firstAudioTimeoutMilliseconds = 5_000,
+    captureCleanupTimeoutMilliseconds = 200,
     continuousInput = false,
     preRollMilliseconds = 1_000,
     replacementBufferMilliseconds = 2_000,
@@ -48,6 +50,11 @@ export class LiveTranslationBridge {
     this.#geminiFactory = geminiFactory;
     this.#drainQuietMilliseconds = drainQuietMilliseconds;
     this.#firstAudioTimeoutMilliseconds = firstAudioTimeoutMilliseconds;
+    if (!Number.isFinite(captureCleanupTimeoutMilliseconds)
+      || captureCleanupTimeoutMilliseconds <= 0) {
+      throw new Error("captureCleanupTimeoutMilliseconds must be a positive number");
+    }
+    this.#captureCleanupTimeoutMilliseconds = captureCleanupTimeoutMilliseconds;
     this.#continuousInput = continuousInput;
     if (!Number.isFinite(preRollMilliseconds) || preRollMilliseconds <= 0) {
       throw new Error("preRollMilliseconds must be a positive number");
@@ -194,6 +201,7 @@ export class LiveTranslationBridge {
       };
       let recoveryPromise = null;
       let recoveryRevision = 0;
+      let recoveryCancellation = null;
       const connectFresh = async () => {
         const setup = deferred();
         void setup.promise.catch(() => {});
@@ -281,6 +289,8 @@ export class LiveTranslationBridge {
         if (recovering || !acceptingInput || !active) return;
         recovering = true;
         const revision = ++recoveryRevision;
+        const cancellation = deferred();
+        recoveryCancellation = cancellation;
         recoveryPromise = (async () => {
           const previousProvider = providerState;
           if (!proactive) {
@@ -298,7 +308,7 @@ export class LiveTranslationBridge {
             reconnectReason,
           });
           try {
-            await captureChain;
+            await Promise.race([captureChain, cancellation.promise]);
             if (revision !== recoveryRevision || !acceptingInput || this.#active !== active) {
               throw providerRecoveryCancelled();
             }
@@ -343,6 +353,7 @@ export class LiveTranslationBridge {
               void recoverProvider();
             }, this.#recoveryCooldownMilliseconds);
           } finally {
+            if (recoveryCancellation === cancellation) recoveryCancellation = null;
             if (!recoveryTimer) recovering = false;
           }
         })();
@@ -388,9 +399,10 @@ export class LiveTranslationBridge {
         pauseInput() { acceptingInput = false; },
         resumeInput() { acceptingInput = true; },
         detachInput() { preparedInput.bufferInstead(); },
-        interruptOutput() {
+        async interruptOutput() {
           acceptingOutput = false;
           outputGeneration += 1;
+          await settle(captureChain);
           if (typeof sink.clearQueue !== "function") {
             throw new Error("translation sink clearQueue is required for handoff");
           }
@@ -427,6 +439,7 @@ export class LiveTranslationBridge {
         cancelAudioDrain() { audioDrainGeneration += 1; },
         cancelRecovery: async () => {
           recoveryRevision += 1;
+          recoveryCancellation?.resolve();
           if (recoveryTimer) {
             this.#cancelRecovery(recoveryTimer);
             recoveryTimer = null;
@@ -556,7 +569,7 @@ export class LiveTranslationBridge {
     active.pauseInput();
     active.detachInput();
     active.cancelAudioDrain();
-    const queueDurationMs = active.interruptOutput();
+    const queueDurationMs = await active.interruptOutput();
     await active.cancelRecovery();
     active.closeProvider();
     const interruptionMilliseconds = Math.max(0, this.#clock() - interruptedAt);
@@ -601,15 +614,19 @@ export class LiveTranslationBridge {
     active.pauseInput();
     active.detachInput();
     active.cancelAudioDrain();
-    const results = await Promise.all([settle(active.capture())]);
     await active.cancelRecovery();
     active.closeProvider();
+    await settle(withTimeout(
+      active.capture(),
+      "translation capture cleanup",
+      this.#captureCleanupTimeoutMilliseconds,
+    ));
     this.#record("gemini-output-aborted", active.context, {
       result: "aborted",
       errorCode: "translation-aborted",
     });
     this.#record("resources-closed", active.context, { result: "closed" });
-    results.push(await settle(this.release(active.context.participantId)));
+    const results = [await settle(this.release(active.context.participantId))];
     const failure = results.find(({ status }) => status === "rejected");
     if (failure) throw failure.reason;
   }

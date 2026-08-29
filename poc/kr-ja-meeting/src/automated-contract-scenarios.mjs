@@ -4,9 +4,13 @@ export async function runAutomatedContractScenarios() {
   let now = 0;
   const clients = [];
   const captured = [];
+  const translationQueue = [];
   const availability = [];
   const events = [];
   let clearedQueues = 0;
+  let handoffPendingCaptureExercised = false;
+  const handoffCaptureEntered = deferred();
+  const releaseHandoffCapture = deferred();
 
   const bridge = new LiveTranslationBridge({
     meetingId: "automated-contract-canary",
@@ -19,8 +23,17 @@ export async function runAutomatedContractScenarios() {
     audioGateway: {
       async translationSink() {
         return {
-          async capture(pcm) { captured.push(Buffer.from(pcm)); },
-          clearQueue() { clearedQueues += 1; },
+          async capture(pcm) {
+            const copy = Buffer.from(pcm);
+            if (!handoffPendingCaptureExercised && copy.equals(Buffer.from([1, 0]))) {
+              handoffPendingCaptureExercised = true;
+              handoffCaptureEntered.resolve();
+              await releaseHandoffCapture.promise;
+            }
+            captured.push(copy);
+            translationQueue.push(copy);
+          },
+          clearQueue() { clearedQueues += 1; translationQueue.length = 0; },
           queuedDurationMs() { return 0; },
         };
       },
@@ -45,11 +58,17 @@ export async function runAutomatedContractScenarios() {
   });
 
   await bridge.start({ id: "ja-speaker", language: "ja" }, { utteranceId: "utterance-1" });
+  const pendingOldCapture = clients[0].options.onTranslatedAudio(audiblePcmBase64(1));
+  await handoffCaptureEntered.promise;
   now = 100;
-  const interruption = await bridge.handoff(
+  const pendingHandoff = bridge.handoff(
     { id: "ko-speaker", language: "ko" },
     { utteranceId: "utterance-2" },
   );
+  releaseHandoffCapture.resolve();
+  await pendingOldCapture;
+  const interruption = await pendingHandoff;
+  const handoffOldMarkerQueued = translationQueue.some((pcm) => pcm.equals(Buffer.from([1, 0])));
   const capturedAfterHandoff = captured.length;
   await clients[0].options.onTranslatedAudio(audiblePcmBase64(1));
   const handoffStaleOutputBlocked = captured.length === capturedAfterHandoff && clearedQueues > 0;
@@ -81,8 +100,12 @@ export async function runAutomatedContractScenarios() {
     type === "gemini-retry-succeeded" && reconnectReason === "go-away-time-left");
   const measurements = {
     interruptionMilliseconds: interruption.interruptionMilliseconds,
+    handoffPendingCaptureExercised,
+    handoffOldMarkerQueued,
     reconnectStatusMilliseconds: reconnecting?.observedAt - providerClosedAt,
-    staleOutputBlocked: handoffStaleOutputBlocked
+    staleOutputBlocked: handoffPendingCaptureExercised
+      && !handoffOldMarkerQueued
+      && handoffStaleOutputBlocked
       && recoveryStaleOutputBlocked
       && proactiveStaleOutputBlocked,
     replacementGapMilliseconds: proactiveReplacementEvent?.interruptionMilliseconds,
@@ -92,6 +115,12 @@ export async function runAutomatedContractScenarios() {
   };
   await bridge.abort();
   return measurements;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
 function audiblePcmBase64(marker) {

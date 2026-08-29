@@ -331,6 +331,60 @@ test("handoff clears stale translation within 200ms without draining old playout
   await bridge.abort();
 });
 
+test("handoff clears audio enqueued by a capture that was already pending at the generation fence", async () => {
+  const clients = [];
+  const queues = new Map();
+  const captureEntered = deferredForBridgeTest();
+  const releaseCapture = deferredForBridgeTest();
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    audioGateway: {
+      async translationSink(language) {
+        const queue = [];
+        queues.set(language, queue);
+        return {
+          async capture(pcm) {
+            if (language === "ko" && pcm.readInt16LE(0) === 7) {
+              captureEntered.resolve();
+              await releaseCapture.promise;
+            }
+            queue.push(pcm.readInt16LE(0));
+          },
+          clearQueue() { queue.length = 0; },
+          queuedDurationMs() { return queue.length * 20; },
+        };
+      },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      const client = {
+        connect() { options.onSetupComplete(); },
+        sendActivityStart() { return true; },
+        sendActivityEnd() { return true; },
+        sendPcm16() { return true; },
+        close() {},
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" }, { utteranceId: "utterance-1" });
+  const oldCapture = clients[0].options.onTranslatedAudio(Buffer.from([7, 0]).toString("base64"));
+  await captureEntered.promise;
+  const handoff = bridge.handoff(
+    { id: "ko-1", language: "ko" },
+    { utteranceId: "utterance-2" },
+  );
+  releaseCapture.resolve();
+  await oldCapture;
+  await handoff;
+
+  assert.deepEqual(queues.get("ko"), []);
+  assert.equal(clients.length, 2);
+  await bridge.abort();
+});
+
 test("a second start is rejected while Gemini setup is still pending", async () => {
   const setupCallbacks = [];
   const clients = [];
@@ -515,6 +569,59 @@ test("abort cancels and awaits a pending recovery replacement without orphan ret
   assert.equal(clients.length, 2);
   assert.equal(scheduled.length, 0);
   assert.deepEqual(availability, ["reconnecting"]);
+});
+
+test("abort closes the provider before bounded cleanup abandons a pending capture", async () => {
+  const clients = [];
+  const availability = [];
+  const captureEntered = deferredForBridgeTest();
+  const releaseCapture = deferredForBridgeTest();
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    captureCleanupTimeoutMilliseconds: 10,
+    onTranslationAvailability(value) { availability.push(value); },
+    audioGateway: {
+      async translationSink() {
+        return {
+          async capture() {
+            captureEntered.resolve();
+            await releaseCapture.promise;
+          },
+          clearQueue() {},
+        };
+      },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      const client = {
+        closed: false,
+        connect() { options.onSetupComplete(); },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16() { return true; },
+        close() { this.closed = true; },
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  void clients[0].options.onTranslatedAudio(Buffer.from([7, 0]).toString("base64"));
+  await captureEntered.promise;
+  clients[0].options.onError(new Error("provider disconnected"));
+  await waitUntil(() => availability.at(-1) === "reconnecting");
+  const abort = bridge.abort();
+  const completedWithinLimit = await Promise.race([
+    abort.then(() => true),
+    delayForTest(100).then(() => false),
+  ]);
+
+  assert.equal(completedWithinLimit, true);
+  assert.equal(clients[0].client.closed, true);
+  assert.equal(clients.length, 1);
+  releaseCapture.resolve();
+  await abort;
 });
 
 test("a fresh start publishes available after an unavailable recovery was aborted", async () => {

@@ -12,6 +12,8 @@ test("automated contract scenarios measure the real bridge transitions", async (
 
   assert.equal(report.ok, true);
   assert.equal(measurements.interruptionMilliseconds <= 200, true);
+  assert.equal(measurements.handoffPendingCaptureExercised, true);
+  assert.equal(measurements.handoffOldMarkerQueued, false);
   assert.equal(measurements.reconnectStatusMilliseconds <= 1_000, true);
   assert.equal(measurements.staleOutputBlocked, true);
   assert.equal(measurements.replacementGapMilliseconds <= 500, true);
