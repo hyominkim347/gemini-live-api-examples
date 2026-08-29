@@ -8,6 +8,7 @@
     "canary:listening-mix": "node scripts/listening-mix-browser-canary.mjs",
     "canary:listening-modes": "node scripts/listening-mode-browser-canary.mjs",
     "canary:natural-conversation": "node scripts/natural-conversation-browser-canary.mjs",
+    "canary:final": "node scripts/final-natural-conversation-canaries.mjs",
     "canary:provider-browser": "node scripts/provider-browser-playout-canary.mjs",
     "canary:provider": "node scripts/provider-canary.mjs",
     "canary:playout-continuity": "node scripts/playout-continuity-canary.mjs",
