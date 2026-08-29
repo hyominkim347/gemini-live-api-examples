@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "pilot:adjudicate-agent": "node scripts/adjudicate-agent-only-pilot.mjs",
+    "pilot:run-budgeted": "node scripts/understand-anything-pilot.mjs run-budgeted",
     "benchmark:score": "node scripts/score-impact-benchmark.mjs",
     "canary:browser-playout": "node scripts/browser-playout-canary.mjs",
     "canary:listening-mix": "node scripts/listening-mix-browser-canary.mjs",

@@ -95,7 +95,7 @@ test("a frozen, grounded Agent Lane result records Agent Context Candidate", asy
 
   assert.equal(result.resultRouting, "Agent Context Candidate");
   assert.deepEqual(result.scorer, {
-    revision: "agent-only-gate-v1",
+    revision: "agent-only-gate-v2",
     inputContractVersion: 1,
     outputContractVersion: 1,
   });
@@ -131,14 +131,80 @@ test("grounded but unrelated evidence does not satisfy the frozen evidence gate"
   });
 
   assert.equal(result.resultRouting, "Stop Rule");
-  assert.equal(result.metrics.correctAnswers, 11);
+  assert.equal(result.metrics.correctAnswers, 12);
   assert.equal(result.metrics.evidencedAnswers, 11);
+  assert.equal(result.questionScores[0].correct, true);
+  assert.equal(result.questionScores[0].evidenced, false);
   assert.deepEqual(result.questionScores[0].missingCodeEvidence, [
     "poc/kr-ja-meeting/src/speech-activity-detector.mjs#SpeechActivityDetector",
   ]);
   assert.deepEqual(result.questionScores[0].missingTestEvidence, [
     "poc/kr-ja-meeting/test/speech-activity-detector.test.mjs#voice followed by sustained silence emits one automatic utterance boundary",
   ]);
+});
+
+test("opposite meaning is incorrect even when frozen evidence is complete", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer = "이 변경은 예상된 동작과 정반대이며 영향이 없다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.resultRouting, "Agent Context Candidate");
+  assert.equal(result.metrics.correctAnswers, 11);
+  assert.equal(result.metrics.evidencedAnswers, 12);
+  assert.equal(result.questionScores[0].correct, false);
+  assert.equal(result.questionScores[0].evidenced, true);
+  assert.equal(result.questionScores[0].meaningMatched, false);
+});
+
+test("meaning-changing punctuation is not normalized into a correct assertion", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer = `${answer.answer.slice(0, -1)}?`;
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].meaningMatched, false);
+  assert.equal(result.questionScores[0].correct, false);
+  assert.equal(result.questionScores[0].evidenced, true);
+});
+
+test("correct meaning remains independent from invented or unverified evidence", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.validationStatus = "unsupported";
+  answer.unverifiedEvidence = ["not verified"];
+  answer.inventedFiles = ["invented.mjs"];
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].correct, true);
+  assert.equal(result.questionScores[0].evidenced, false);
+  assert.equal(result.metrics.correctAnswers, 12);
+  assert.equal(result.metrics.evidencedAnswers, 11);
+  assert.equal(result.resultRouting, "Stop Rule");
 });
 
 test("unknown, unsupported, or invented evidence activates the Stop Rule", async () => {
@@ -164,12 +230,11 @@ test("unknown, unsupported, or invented evidence activates the Stop Rule", async
   });
 
   assert.equal(result.resultRouting, "Stop Rule");
-  assert.equal(result.metrics.correctAnswers, 9);
+  assert.equal(result.metrics.correctAnswers, 11);
   assert.equal(result.metrics.evidencedAnswers, 9);
   assert.equal(result.metrics.inventedFiles, 1);
   assert.equal(result.metrics.inventedRelations, 1);
   assert.deepEqual(result.failures, [
-    "correct-answers-below-10",
     "evidence-missing",
     "invented-file",
     "invented-relation",

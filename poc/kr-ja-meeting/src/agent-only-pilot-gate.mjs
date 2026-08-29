@@ -9,7 +9,7 @@ const PROVIDER = "current-codex-provider-only";
 const ORDER_POLICY = "odd-graph-first-even-rg-first";
 const GRAPH_ARM = "understandAnythingGraph";
 const RG_ARM = "repositorySearchRg";
-const SCORER_REVISION = "agent-only-gate-v1";
+const SCORER_REVISION = "agent-only-gate-v2";
 const OUTPUT_CONTRACT_VERSION = 1;
 
 export function adjudicateAgentOnlyGate({
@@ -104,7 +104,9 @@ function adjudicateQuestion(question, answer) {
   const missingCode = expectedCode.filter((value) => !actualCode.has(value));
   const missingTests = expectedTests.filter((value) => !actualTests.has(value));
   const evidenced = verified && missingCode.length === 0 && missingTests.length === 0;
-  const correct = evidenced;
+  const meaningMatched =
+    canonicalMeaning(answer.answer) === canonicalMeaning(question.expectedAnswer.summary);
+  const correct = answer.unknown === false && meaningMatched;
 
   return {
     questionId: question.id,
@@ -112,6 +114,7 @@ function adjudicateQuestion(question, answer) {
     unknown: answer.unknown,
     evidenced,
     correct,
+    meaningMatched,
     expectedCodeEvidence: expectedCode,
     matchedCodeEvidence: matchedCode,
     missingCodeEvidence: missingCode,
@@ -120,6 +123,14 @@ function adjudicateQuestion(question, answer) {
     missingTestEvidence: missingTests,
     answerTimeMs: answer.answerTimeMs,
   };
+}
+
+function canonicalMeaning(value) {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("und")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function validateInputs(benchmark, raw) {

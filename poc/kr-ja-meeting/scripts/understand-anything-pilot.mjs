@@ -2,7 +2,9 @@
 
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
 export const ANALYSIS_SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
@@ -10,9 +12,11 @@ export const UPSTREAM_REPOSITORY = "https://github.com/Egonex-AI/Understand-Anyt
 export const UPSTREAM_COMMIT = "ba450c43425f3de6d43daf76526950ad8ca93536";
 export const FULL_ANALYSIS_BUDGET_MS = 30 * 60 * 1000;
 export const INCREMENTAL_REFRESH_BUDGET_MS = 5 * 60 * 1000;
+export const BUDGET_MEASUREMENT = "budgeted-child-process-v1";
 export const CALIBRATION_QUESTION =
   "Live Translate가 completion event를 보내지 않을 때 phraseBoundary()는 번역 오디오를 " +
   "유실하지 않고 다음 입력 구간을 어떻게 시작하며, 첫 audible output이 없으면 어떻게 실패하는가?";
+const PHASES = ["fullAnalysis", "incrementalRefresh"];
 
 const CODE_EXTENSIONS = new Set([
   ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
@@ -41,6 +45,92 @@ function git(repo, args) {
     throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed`);
   }
   return result.stdout;
+}
+
+function signalProcessTree(child, signal) {
+  if (child.pid && process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+}
+
+export function runBudgetedPilotPhase({
+  phase,
+  budgetMilliseconds,
+  command,
+  cwd = process.cwd(),
+  env = process.env,
+  killGraceMilliseconds = 1_000,
+  stdinText,
+}) {
+  if (!PHASES.includes(phase)) {
+    throw new TypeError(`Unsupported pilot phase: ${phase}`);
+  }
+  if (!Number.isFinite(budgetMilliseconds) || budgetMilliseconds <= 0) {
+    throw new TypeError("budgetMilliseconds must be a positive finite number");
+  }
+  if (!Array.isArray(command) || command.length === 0 ||
+      command.some((part) => typeof part !== "string" || part.length === 0)) {
+    throw new TypeError("command must be a non-empty string array");
+  }
+  if (!Number.isFinite(killGraceMilliseconds) || killGraceMilliseconds < 0) {
+    throw new TypeError("killGraceMilliseconds must be a non-negative finite number");
+  }
+
+  const startedAt = new Date().toISOString();
+  const started = performance.now();
+  const child = spawn(command[0], command.slice(1), {
+    cwd,
+    env,
+    stdio: [stdinText === undefined ? "inherit" : "pipe", "inherit", "inherit"],
+    detached: process.platform !== "win32",
+  });
+  if (stdinText !== undefined) child.stdin.end(stdinText);
+
+  return new Promise((resolveMetric) => {
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimer;
+    const budgetTimer = setTimeout(() => {
+      timedOut = true;
+      signalProcessTree(child, "SIGTERM");
+      forceKillTimer = setTimeout(() => signalProcessTree(child, "SIGKILL"), killGraceMilliseconds);
+    }, budgetMilliseconds);
+
+    const finish = ({ exitCode = null, signal = null, spawnError = null }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(budgetTimer);
+      clearTimeout(forceKillTimer);
+      const elapsedMilliseconds = Math.round((performance.now() - started) * 1_000) / 1_000;
+      resolveMetric({
+        status: timedOut ? "timed-out" : exitCode === 0 ? "completed" : "failed",
+        phase,
+        measurement: BUDGET_MEASUREMENT,
+        budgetMilliseconds,
+        elapsedMilliseconds,
+        timedOut,
+        exitCode,
+        signal,
+        spawnError,
+        commandSha256: createHash("sha256").update(JSON.stringify(command)).digest("hex"),
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      });
+    };
+
+    child.once("error", (error) => finish({ spawnError: error.message }));
+    child.once("close", (exitCode, signal) => finish({ exitCode, signal }));
+  });
 }
 
 async function pathExists(path) {
@@ -159,7 +249,9 @@ function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index += 1) {
     const option = args[index];
-    if (!option.startsWith("--")) throw new Error(`Unexpected argument: ${option}`);
+    if (!option.startsWith("--") || option.length === 2) {
+      throw new Error(`Unexpected argument: ${option}`);
+    }
     const value = args[index + 1];
     if (!value || value.startsWith("--")) throw new Error(`${option} requires a value`);
     options[option.slice(2)] = value;
@@ -191,7 +283,7 @@ async function manifestCommand(args) {
 function buildPilotPlan(repo, artifactRoot) {
   const snapshotCheckout = resolve(artifactRoot, "analysis-snapshot");
   const upstreamCheckout = resolve(artifactRoot, "understand-anything");
-  return {
+  const plan = {
     contractVersion: 1,
     analysisSnapshot: ANALYSIS_SNAPSHOT,
     upstream: {
@@ -216,6 +308,12 @@ function buildPilotPlan(repo, artifactRoot) {
       fullAnalysis: FULL_ANALYSIS_BUDGET_MS,
       incrementalRefresh: INCREMENTAL_REFRESH_BUDGET_MS,
     },
+    budgetRunner: {
+      command: "npm run pilot:run-budgeted --",
+      measurement: BUDGET_MEASUREMENT,
+      phases: PHASES,
+      timeoutPolicy: "SIGTERM-then-SIGKILL",
+    },
     artifacts: {
       root: resolve(artifactRoot),
       graphDirectory: resolve(snapshotCheckout, ".ua"),
@@ -237,21 +335,38 @@ function buildPilotPlan(repo, artifactRoot) {
       "background-automation",
     ],
   };
+  plan.phaseInvocations = Object.fromEntries(PHASES.map((phase) => [phase, {
+    command: buildCodexCommand(plan),
+    promptFile: phase === "fullAnalysis" ? "codex-prompt.md" : "incremental-codex-prompt.md",
+  }]));
+  return plan;
 }
 
-function buildCodexPrompt(plan) {
+function buildCodexCommand(plan) {
+  return [
+    "codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+    "--sandbox", "workspace-write", "-C", plan.snapshotCheckout,
+    "--add-dir", plan.upstream.checkout, "-",
+  ];
+}
+
+function buildCodexPrompt(plan, phase = "fullAnalysis") {
   const skillPath = resolve(
     plan.upstream.checkout,
     "understand-anything-plugin/skills/understand/SKILL.md",
   );
-  return `Execute the pinned Understand-Anything full analysis for the local AIN-7639 pilot.\n\n` +
+  const analysisMode = phase === "fullAnalysis" ? "full analysis" : "Incremental Refresh";
+  const understandArguments = phase === "fullAnalysis"
+    ? plan.understandArguments
+    : plan.understandArguments.filter((argument) => argument !== "--full");
+  return `Execute the pinned Understand-Anything ${analysisMode} for the local AIN-7639 pilot.\n\n` +
     `1. Read the complete upstream skill at ${skillPath}.\n` +
     `   If core dist is absent, run the plan's localBuild commands only in ` +
     `${plan.upstream.pluginRoot}; do not install globally.\n` +
     `2. Analyze only ${plan.snapshotCheckout}, whose HEAD must equal ${plan.analysisSnapshot}.\n` +
     `3. Use the pre-approved .ua/.understandignore without prompting. Keep ` +
     `UNDERSTAND_NO_WORKTREE_REDIRECT=1.\n` +
-    `4. Apply --full --language ko --no-auto-update. Do not install globally, create symlinks, ` +
+    `4. Apply ${understandArguments.join(" ")}. Do not install globally, create symlinks, ` +
     `add hooks, add credentials/providers, or modify tracked source files.\n` +
     `5. Use the current Codex provider. Write only local .ua artifacts. Preserve scan-result.json.\n` +
     `6. Stop with a non-zero result if the analysis cannot finish within the enclosing budget.\n`;
@@ -266,6 +381,11 @@ async function planCommand(args) {
   await Promise.all([
     writeFile(resolve(artifactRoot, "pilot-plan.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8"),
     writeFile(resolve(artifactRoot, "codex-prompt.md"), buildCodexPrompt(plan), "utf8"),
+    writeFile(
+      resolve(artifactRoot, "incremental-codex-prompt.md"),
+      buildCodexPrompt(plan, "incrementalRefresh"),
+      "utf8",
+    ),
   ]);
   process.stdout.write(`${JSON.stringify({ command: "plan", artifactRoot })}\n`);
 }
@@ -377,6 +497,11 @@ async function prepareCommand(args) {
     writeFile(resolve(artifactRoot, "corpus-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8"),
     writeFile(resolve(artifactRoot, "pilot-plan.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8"),
     writeFile(resolve(artifactRoot, "codex-prompt.md"), buildCodexPrompt(plan), "utf8"),
+    writeFile(
+      resolve(artifactRoot, "incremental-codex-prompt.md"),
+      buildCodexPrompt(plan, "incrementalRefresh"),
+      "utf8",
+    ),
     writeFile(resolve(artifactRoot, "prepare-result.json"), `${JSON.stringify({
       snapshotHead,
       upstreamHead,
@@ -385,8 +510,14 @@ async function prepareCommand(args) {
       symlinksCreated: false,
     }, null, 2)}\n`, "utf8"),
     writeFile(resolve(artifactRoot, "run-metrics.json"), `${JSON.stringify({
-      fullAnalysis: { status: "not-run", elapsedMilliseconds: null },
-      incrementalRefresh: { status: "not-run", elapsedMilliseconds: null },
+      fullAnalysis: {
+        status: "not-run", measurement: BUDGET_MEASUREMENT,
+        budgetMilliseconds: FULL_ANALYSIS_BUDGET_MS, elapsedMilliseconds: null,
+      },
+      incrementalRefresh: {
+        status: "not-run", measurement: BUDGET_MEASUREMENT,
+        budgetMilliseconds: INCREMENTAL_REFRESH_BUDGET_MS, elapsedMilliseconds: null,
+      },
     }, null, 2)}\n`, "utf8"),
     writeFile(resolve(artifactRoot, "calibration-answer.json"), `${JSON.stringify({
       status: "not-run",
@@ -405,6 +536,56 @@ async function prepareCommand(args) {
     upstreamHead,
     included: manifest.counts.included,
   })}\n`);
+}
+
+async function runBudgetedCommand(args) {
+  const options = parseOptions(args);
+  const artifactRoot = resolve(options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"));
+  const phase = options.phase;
+  if (!PHASES.includes(phase)) {
+    throw new Error("--phase must be fullAnalysis or incrementalRefresh");
+  }
+  const plan = await readJson(resolve(artifactRoot, "pilot-plan.json"));
+  const budgetMilliseconds = plan.budgetsMilliseconds?.[phase];
+  const requiredBudget = phase === "fullAnalysis"
+    ? FULL_ANALYSIS_BUDGET_MS
+    : INCREMENTAL_REFRESH_BUDGET_MS;
+  if (budgetMilliseconds !== requiredBudget ||
+      plan.budgetRunner?.measurement !== BUDGET_MEASUREMENT) {
+    throw new Error(`${phase} budget runner contract changed`);
+  }
+  const expectedCommand = buildCodexCommand(plan);
+  const invocation = plan.phaseInvocations?.[phase];
+  if (JSON.stringify(invocation?.command) !== JSON.stringify(expectedCommand)) {
+    throw new Error(`${phase} command contract changed`);
+  }
+  const expectedPromptFile = phase === "fullAnalysis"
+    ? "codex-prompt.md"
+    : "incremental-codex-prompt.md";
+  if (invocation.promptFile !== expectedPromptFile) {
+    throw new Error(`${phase} prompt contract changed`);
+  }
+  const promptText = await readFile(resolve(artifactRoot, expectedPromptFile), "utf8");
+  if (promptText !== buildCodexPrompt(plan, phase)) {
+    throw new Error(`${phase} prompt content changed`);
+  }
+
+  const metric = await runBudgetedPilotPhase({
+    phase,
+    budgetMilliseconds,
+    command: expectedCommand,
+    cwd: plan.snapshotCheckout,
+    env: { ...process.env, ...plan.environment },
+    stdinText: promptText,
+  });
+  const metricsPath = resolve(artifactRoot, "run-metrics.json");
+  const metrics = await readJson(metricsPath);
+  metrics[phase] = metric;
+  await writeFile(metricsPath, `${JSON.stringify(metrics, null, 2)}\n`, "utf8");
+  process.stdout.write(`${JSON.stringify({ command: "run-budgeted", metric })}\n`);
+  if (metric.status !== "completed") {
+    throw new Error(`${phase} ${metric.status} after ${metric.elapsedMilliseconds}ms`);
+  }
 }
 
 async function readJson(path) {
@@ -486,7 +667,16 @@ async function verifyArtifactCommand(args) {
       errors.push(`${name} budget contract changed`);
     }
     const metric = metrics[name];
-    if (metric?.status !== "completed" || !Number.isFinite(metric?.elapsedMilliseconds)) {
+    const expectedCommandSha256 = createHash("sha256")
+      .update(JSON.stringify(buildCodexCommand(plan)))
+      .digest("hex");
+    if (metric?.measurement !== BUDGET_MEASUREMENT ||
+        metric?.budgetMilliseconds !== budget || metric?.timedOut !== false ||
+        metric?.exitCode !== 0 || metric?.phase !== name || metric?.signal !== null ||
+        metric?.spawnError !== null || metric?.commandSha256 !== expectedCommandSha256 ||
+        !metric?.startedAt || !metric?.finishedAt) {
+      errors.push(`${name} timing evidence was not issued by the budgeted child runner`);
+    } else if (metric.status !== "completed" || !Number.isFinite(metric.elapsedMilliseconds)) {
       errors.push(`${name} has no completed timing evidence`);
     } else if (metric.elapsedMilliseconds > budget) {
       errors.push(`${name} exceeded budget: ${metric.elapsedMilliseconds}ms > ${budget}ms`);
@@ -603,9 +793,13 @@ async function main() {
     await verifyArtifactCommand(args);
     return;
   }
+  if (command === "run-budgeted") {
+    await runBudgetedCommand(args);
+    return;
+  }
   throw new Error(
     "Usage: node understand-anything-pilot.mjs " +
-    "<manifest|plan|prepare|verify-scan|verify-artifact> " +
+    "<manifest|plan|prepare|verify-scan|verify-artifact|run-budgeted> " +
     "[--repo PATH] [--artifact-root PATH] [--upstream-source PATH_OR_URL]",
   );
 }
