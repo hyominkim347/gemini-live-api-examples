@@ -9,6 +9,7 @@ test("voice followed by sustained silence emits one automatic utterance boundary
     onEvent: (event) => events.push(event),
     speechThreshold: 0.05,
     silenceMilliseconds: 500,
+    minimumUtteranceSpanMilliseconds: 0,
   });
 
   detector.observe(0.01, 0);
@@ -22,6 +23,60 @@ test("voice followed by sustained silence emits one automatic utterance boundary
   assert.deepEqual(events, [
     { type: "speech-start", observedAt: 100 },
     { type: "speech-end", observedAt: 750 },
+  ]);
+});
+
+test("brief speech and a short pause stay in one utterance when speech resumes", () => {
+  const events = [];
+  const detector = new SpeechActivityDetector({
+    onEvent: (event) => events.push(event),
+  });
+
+  detector.observe(0.08, 100);
+  detector.observe(0.09, 700);
+  detector.observe(0.01, 1_300);
+  detector.observe(0.01, 2_200);
+  detector.observe(0.08, 2_300);
+  detector.observe(0.09, 2_900);
+  detector.observe(0.01, 3_500);
+
+  assert.deepEqual(events, [
+    { type: "speech-start", observedAt: 100 },
+    { type: "speech-end", observedAt: 3_500 },
+  ]);
+});
+
+test("a long utterance keeps the regular silence boundary by default", () => {
+  const events = [];
+  const detector = new SpeechActivityDetector({
+    onEvent: (event) => events.push(event),
+  });
+
+  detector.observe(0.08, 100);
+  detector.observe(0.09, 1_900);
+  detector.observe(0.01, 2_499);
+  detector.observe(0.01, 2_500);
+
+  assert.deepEqual(events, [
+    { type: "speech-start", observedAt: 100 },
+    { type: "speech-end", observedAt: 2_500 },
+  ]);
+});
+
+test("a lone brief utterance closes after the extended silence boundary", () => {
+  const events = [];
+  const detector = new SpeechActivityDetector({
+    onEvent: (event) => events.push(event),
+  });
+
+  detector.observe(0.08, 100);
+  detector.observe(0.09, 700);
+  detector.observe(0.01, 2_499);
+  detector.observe(0.01, 2_500);
+
+  assert.deepEqual(events, [
+    { type: "speech-start", observedAt: 100 },
+    { type: "speech-end", observedAt: 2_500 },
   ]);
 });
 
