@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 export class LiveTranslationBridge {
   #meetingId;
   #audioGateway;
@@ -6,6 +8,7 @@ export class LiveTranslationBridge {
   #firstAudioTimeoutMilliseconds;
   #continuousInput;
   #preRollMilliseconds;
+  #clock;
   #eventRecorder;
   #preparedInputs = new Map();
   #active = null;
@@ -21,6 +24,7 @@ export class LiveTranslationBridge {
     firstAudioTimeoutMilliseconds = 5_000,
     continuousInput = false,
     preRollMilliseconds = 1_000,
+    clock = () => performance.now(),
     eventRecorder = { record() {} },
   }) {
     if (!meetingId || !audioGateway || !geminiFactory) {
@@ -36,6 +40,8 @@ export class LiveTranslationBridge {
       throw new Error("preRollMilliseconds must be a positive number");
     }
     this.#preRollMilliseconds = preRollMilliseconds;
+    if (typeof clock !== "function") throw new Error("translation bridge clock is required");
+    this.#clock = clock;
     if (!eventRecorder || typeof eventRecorder.record !== "function") {
       throw new Error("eventRecorder.record must be a function");
     }
@@ -104,6 +110,8 @@ export class LiveTranslationBridge {
     let audibleOutputReceived = false;
     let audibleInputReceived = false;
     let acceptingInput = true;
+    let acceptingOutput = true;
+    let outputGeneration = 0;
     let inputRecorded = false;
     let outputRecorded = false;
     let outputCompleted = false;
@@ -146,6 +154,8 @@ export class LiveTranslationBridge {
         onClose() { setup.reject(new Error("Gemini closed during setup")); },
         onError: setup.reject,
         onTranslatedAudio: (base64Audio) => {
+          if (!acceptingOutput) return Promise.resolve();
+          const generation = outputGeneration;
           const pcm = Buffer.from(base64Audio, "base64");
           if (hasAudiblePcm(pcm)) {
             audibleOutputReceived = true;
@@ -156,7 +166,9 @@ export class LiveTranslationBridge {
             }
           }
           captureChain = captureChain.then(async () => {
+            if (!acceptingOutput || generation !== outputGeneration) return;
             const capture = await sink.capture(pcm);
+            if (!acceptingOutput || generation !== outputGeneration) return;
             if (Number.isFinite(capture?.queuedAfterMs)) {
               this.#record("livekit-queue-updated", context, {
                 queueDurationMs: capture.queuedAfterMs,
@@ -205,6 +217,15 @@ export class LiveTranslationBridge {
         pauseInput() { acceptingInput = false; },
         resumeInput() { acceptingInput = true; },
         detachInput() { preparedInput.bufferInstead(); },
+        interruptOutput() {
+          acceptingOutput = false;
+          outputGeneration += 1;
+          if (typeof sink.clearQueue !== "function") {
+            throw new Error("translation sink clearQueue is required for handoff");
+          }
+          sink.clearQueue();
+          return typeof sink.queuedDurationMs === "function" ? sink.queuedDurationMs() : 0;
+        },
         resetAudioTurn() {
           audibleInputReceived = false;
           audibleOutputReceived = false;
@@ -344,13 +365,33 @@ export class LiveTranslationBridge {
   }
 
   async handoff(speaker, { utteranceId } = {}) {
-    await this.stop({ releasePrepared: false });
+    const active = this.#requireActive();
+    const interruptedAt = this.#clock();
+    this.#active = null;
+    active.pauseInput();
+    active.detachInput();
+    active.cancelAudioDrain();
+    const queueDurationMs = active.interruptOutput();
+    active.gemini.close();
+    const interruptionMilliseconds = Math.max(0, this.#clock() - interruptedAt);
+    this.#record("translation-interrupted", active.context, {
+      relatedParticipantId: speaker.id,
+      interruptionMilliseconds,
+      queueDurationMs,
+      result: "interrupted",
+    });
+    this.#record("gemini-output-aborted", active.context, {
+      result: "aborted",
+      errorCode: "translation-interrupted",
+    });
+    this.#record("resources-closed", active.context, { result: "interrupted" });
     try {
       await this.start(speaker, { utteranceId });
     } catch (error) {
       await settle(this.abort());
       throw error;
     }
+    return { interruptionMilliseconds };
   }
 
   async abort() {

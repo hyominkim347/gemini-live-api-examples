@@ -10,6 +10,7 @@ const EVENT_TYPES = new Set([
   "translation-focus-selected",
   "translation-focus-changed",
   "translation-focus-cleared",
+  "translation-interrupted",
   "overlap-started",
   "overlap-detected",
   "overlap-ended",
@@ -62,6 +63,7 @@ const NUMBER_FIELDS = new Map([
   ["detectedAt", (value) => Number.isFinite(value)],
   ["gain", (value) => Number.isFinite(value) && value >= 0 && value <= 1],
   ["queueDurationMs", (value) => Number.isFinite(value) && value >= 0],
+  ["interruptionMilliseconds", (value) => Number.isFinite(value) && value >= 0],
 ]);
 
 const INPUT_FIELDS = new Set(["type", ...STRING_FIELDS, ...NUMBER_FIELDS.keys()]);
@@ -226,7 +228,7 @@ function traceStage(type) {
   if (type.startsWith("gemini-retry-")) return "provider-reconnect";
   if (type.startsWith("gemini-")) return "gemini-provider";
   if (type.startsWith("livekit-")) return "livekit-webrtc";
-  if (type.startsWith("translation-focus-") || type.startsWith("overlap-")) {
+  if (type.startsWith("translation-") || type.startsWith("overlap-")) {
     return "focus-control";
   }
   if (type.startsWith("playout-") || type.startsWith("listening-")) {

@@ -253,17 +253,26 @@ test("a second speaker cannot overlap the active translation bridge", async () =
   await stop;
 });
 
-test("handoff closes the focused session but keeps its mic-on pre-roll subscription", async () => {
+test("handoff clears stale translation within 200ms without draining old playout", async () => {
   const calls = [];
   const clients = [];
+  const events = [];
   let originalFrame;
+  let now = 1_000;
   const bridge = new LiveTranslationBridge({
     meetingId: "browser-poc",
-    drainQuietMilliseconds: 0,
+    clock: () => now,
     audioGateway: {
       async translationSink(language) {
         calls.push(`sink:${language}`);
-        return { async capture() { calls.push("capture"); } };
+        return {
+          async capture(pcm) { calls.push(`capture:${language}:${pcm.toString("hex")}`); },
+          clearQueue() { calls.push(`clear:${language}:${now}`); },
+          async waitForPlayout() {
+            calls.push(`wait:${language}`);
+            throw new Error("stale playout must not be drained");
+          },
+        };
       },
       async subscribeOriginal(trackName, onFrame) {
         calls.push(`subscribe:${trackName}`);
@@ -282,6 +291,7 @@ test("handoff closes the focused session but keeps its mic-on pre-roll subscript
       clients.push({ client, options });
       return client;
     },
+    eventRecorder: { record(event) { events.push(event); } },
   });
 
   await bridge.start(
@@ -290,25 +300,34 @@ test("handoff closes the focused session but keeps its mic-on pre-roll subscript
   );
   originalFrame(Buffer.from([1, 2]), 16_000);
   await clients[0].options.onTranslatedAudio(Buffer.from([3, 4]).toString("base64"));
-  await bridge.handoff(
+  clients[0].options.onGenerationComplete();
+  now = 1_100;
+  const interruption = await bridge.handoff(
     { id: "ko-1", language: "ko" },
     { previousUtteranceId: "utterance-1", utteranceId: "utterance-2" },
   );
+  now = 1_300;
+  await clients[0].options.onTranslatedAudio(Buffer.from([5, 6]).toString("base64"));
 
-  assert.deepEqual(calls, [
-    "subscribe:original:ja-1",
-    "sink:ko",
-    "activity-start",
-    "capture",
-    "activity-end",
-    "gemini-close",
-    "subscribe:original:ko-1",
-    "sink:ja",
-    "activity-start",
-  ]);
+  assert.equal(interruption.interruptionMilliseconds <= 200, true);
+  assert.equal(calls.includes("clear:ko:1100"), true);
+  assert.equal(calls.includes("wait:ko"), false);
+  assert.equal(calls.includes("capture:ko:0506"), false);
+  assert.equal(calls.includes("sink:ja"), true);
   assert.equal(clients.length, 2);
   assert.equal(clients[0].options.utteranceId, "utterance-1");
   assert.equal(clients[1].options.utteranceId, "utterance-2");
+  assert.deepEqual(events.filter(({ type }) => type === "translation-interrupted"), [{
+    type: "translation-interrupted",
+    participantId: "ja-1",
+    utteranceId: "utterance-1",
+    language: "ja",
+    targetLanguage: "ko",
+    relatedParticipantId: "ko-1",
+    interruptionMilliseconds: 0,
+    queueDurationMs: 0,
+    result: "interrupted",
+  }]);
   await bridge.abort();
 });
 

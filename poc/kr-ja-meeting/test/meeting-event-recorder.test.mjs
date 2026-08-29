@@ -68,6 +68,39 @@ test("record rejects unknown event types and invalid allowlisted values", () => 
   );
 });
 
+test("record stores interruption timing without translation content", () => {
+  const written = [];
+  const recorder = new MeetingEventRecorder({
+    meetingId: "meeting-1",
+    clock: () => 1_200,
+    write(event) { written.push(event); },
+  });
+
+  recorder.record({
+    type: "translation-interrupted",
+    participantId: "participant-1",
+    relatedParticipantId: "participant-2",
+    utteranceId: "utterance-1",
+    targetLanguage: "ko",
+    interruptionMilliseconds: 0,
+    queueDurationMs: 0,
+    result: "interrupted",
+  });
+
+  assert.deepEqual(written, [{
+    type: "translation-interrupted",
+    meetingId: "meeting-1",
+    participantId: "participant-1",
+    utteranceId: "utterance-1",
+    targetLanguage: "ko",
+    result: "interrupted",
+    relatedParticipantId: "participant-2",
+    queueDurationMs: 0,
+    interruptionMilliseconds: 0,
+    timestamp: 1_200,
+  }]);
+});
+
 test("segment trace separates browser, focus, Gemini, LiveKit, reconnect, and playout stages", () => {
   let now = 1_000;
   const store = new MemoryMeetingSegmentTraceStore({ clock: () => now });
