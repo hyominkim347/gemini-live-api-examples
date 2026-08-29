@@ -51,7 +51,7 @@ test("microphone on remains unmuted and silent until speech activity starts", as
     microphone: "unmuted",
     speech: "silent",
     utteranceId: null,
-    audio: { original: false, translation: false, trackId: null, mode: "silent" },
+    audio: { mode: "silent", tracks: [] },
   });
   assert.equal(state.activeSpeakerId, null);
   assert.equal(state.activeUtteranceId, null);

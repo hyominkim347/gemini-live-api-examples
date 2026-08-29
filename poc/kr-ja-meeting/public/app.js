@@ -1,4 +1,5 @@
 import { Room, RoomEvent, Track } from "/vendor/livekit-client.mjs";
+import { BrowserAudioPlayout } from "/public/browser-audio-playout.mjs";
 import { syncAudioSubscriptions } from "/src/livekit-subscriptions.mjs";
 import { SpeechActivityDetector } from "/src/speech-activity-detector.mjs";
 
@@ -6,7 +7,7 @@ const languageName = { ko: "한국어", ja: "日本語" };
 const modeCopy = {
   silent: "연결 대기",
   speaking: "말하는 중",
-  translated: "번역 음성 청취",
+  "translation-focused": "작은 원음 · 통역 음성 청취",
   original: "원음 확인 중",
   "original-until-boundary": "다음 발화부터 번역",
   "same-language-original": "같은 언어 원음",
@@ -14,6 +15,7 @@ const modeCopy = {
 
 const app = document.querySelector("#app");
 const audioOutput = document.querySelector("#audio-output");
+const audioPlayout = new BrowserAudioPlayout(audioOutput);
 let displayName = "";
 let preferredLanguage = "ko";
 let localParticipant = null;
@@ -41,7 +43,7 @@ function localState() {
 }
 
 function localAudioState() {
-  return localState()?.audio ?? { mode: "silent", trackId: null };
+  return localState()?.audio ?? { mode: "silent", tracks: [] };
 }
 
 function render() {
@@ -123,7 +125,7 @@ function participantRow(state, active) {
 }
 
 function listenerActions(audio) {
-  const listenButton = audio.mode === "translated"
+  const listenButton = audio.mode === "translation-focused"
     ? `<button type="button" data-action="hold-original" ${busy ? "disabled" : ""}>원음 확인</button>`
     : audio.mode === "original"
       ? `<button type="button" data-action="release-original" ${busy ? "disabled" : ""}>번역으로 복귀</button>`
@@ -145,7 +147,9 @@ function avatar(participant, size = "normal") {
 }
 
 function trackPill(audio) {
-  const tone = audio.translation ? "translated" : audio.original ? "original" : "silent";
+  const hasTranslation = audio.tracks?.some(({ kind }) => kind === "translation");
+  const hasOriginal = audio.tracks?.some(({ kind }) => kind === "original");
+  const tone = hasTranslation ? "translated" : hasOriginal ? "original" : "silent";
   return `<span class="track-pill ${tone}"><i></i>${modeCopy[audio.mode] ?? "연결 대기"}</span>`;
 }
 
@@ -312,22 +316,18 @@ async function refreshState() {
 
 function syncSubscriptions() {
   if (!room || !localParticipant) return;
-  const desiredTrackId = localAudioState().trackId;
-  syncAudioSubscriptions(room, desiredTrackId);
-  for (const participant of room.remoteParticipants.values()) {
-    for (const publication of participant.trackPublications.values()) {
-      if (publication.track && publication.trackName !== desiredTrackId) detachTrack(publication.track);
-    }
-  }
+  const listeningPlan = localAudioState();
+  audioPlayout.setPlan(listeningPlan);
+  syncAudioSubscriptions(room, listeningPlan);
 }
 
 function attachSubscribedTrack(track, publication) {
-  if (track.kind !== Track.Kind.Audio || publication.trackName !== localAudioState().trackId) return;
-  audioOutput.replaceChildren(track.attach());
+  if (track.kind !== Track.Kind.Audio) return;
+  audioPlayout.attach(track, publication);
 }
 
 function detachTrack(track) {
-  for (const element of track.detach()) element.remove();
+  audioPlayout.detach(track);
 }
 
 async function leaveMeeting() {
@@ -363,7 +363,7 @@ async function handleUnexpectedDisconnect() {
 async function disconnectRoom() {
   if (pollTimer) window.clearInterval(pollTimer);
   pollTimer = null;
-  audioOutput.replaceChildren();
+  audioPlayout.clear();
   intentionalDisconnect = true;
   if (room) await room.disconnect();
   intentionalDisconnect = false;

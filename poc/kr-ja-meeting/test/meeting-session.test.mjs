@@ -15,7 +15,7 @@ test("dynamic roster keeps microphone and speech as separate state", () => {
     microphone: "unmuted",
     speech: "silent",
     utteranceId: null,
-    audio: { original: false, translation: false, trackId: null, mode: "silent" },
+    audio: { mode: "silent", tracks: [] },
   });
 
   session.startSpeech("ja-1", "utterance-1");
@@ -35,7 +35,7 @@ test("join and leave change the roster without a four-person constraint", () => 
   assert.deepEqual(session.participants.map(({ id }) => id), ["ko-1"]);
 });
 
-test("one automatic speaker still produces the existing listener audio plan", () => {
+test("one automatic speaker produces relation-based listener audio plans", () => {
   const session = new MeetingSession([
     { id: "ja-1", name: "Yuki", language: "ja" },
     { id: "ko-1", name: "민준", language: "ko" },
@@ -44,17 +44,24 @@ test("one automatic speaker still produces the existing listener audio plan", ()
   session.setMicrophone("ja-1", true);
   session.startSpeech("ja-1", "utterance-1");
 
-  assert.deepEqual(session.audioPlanFor("ko-1"), {
-    original: false,
-    translation: true,
-    trackId: "translation:ko",
-    mode: "translated",
-  });
+  const foreignPlan = session.audioPlanFor("ko-1");
+  assert.equal(foreignPlan.mode, "translation-focused");
+  assert.deepEqual(foreignPlan.tracks.map(({ trackId, kind, role }) => ({ trackId, kind, role })), [
+    { trackId: "original:ja-1", kind: "original", role: "background" },
+    { trackId: "translation:ko", kind: "translation", role: "foreground" },
+  ]);
+  assert.ok(foreignPlan.tracks[0].gain > 0);
+  assert.ok(foreignPlan.tracks[0].gain < foreignPlan.tracks[1].gain);
   assert.deepEqual(session.audioPlanFor("ja-2"), {
-    original: true,
-    translation: false,
-    trackId: "original:ja-1",
     mode: "same-language-original",
+    tracks: [
+      {
+        trackId: "original:ja-1",
+        kind: "original",
+        role: "foreground",
+        gain: 1,
+      },
+    ],
   });
 });
 
