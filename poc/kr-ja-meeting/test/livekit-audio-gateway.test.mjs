@@ -32,6 +32,17 @@ test("translation sink exposes queue state and explicit playout lifecycle", asyn
 
     await sink.waitForPlayout();
     assert.equal(sink.queuedDurationMs(), 0);
+
+    const staleGeneration = {};
+    sink.invalidateGeneration(staleGeneration);
+    const stale = await sink.capture(sineFrame(), staleGeneration);
+    assert.equal(stale.committed, false);
+    assert.equal(sink.queuedDurationMs(), 0);
+
+    const fresh = await sink.capture(sineFrame(), {});
+    assert.equal(fresh.committed, true);
+    assert.ok(sink.queuedDurationMs() > 0);
+    await sink.waitForPlayout();
     sink.clearQueue();
     assert.equal(published.length, 1);
   } finally {

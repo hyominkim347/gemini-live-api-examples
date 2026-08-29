@@ -267,6 +267,7 @@ test("handoff clears stale translation within 200ms without draining old playout
         calls.push(`sink:${language}`);
         return {
           async capture(pcm) { calls.push(`capture:${language}:${pcm.toString("hex")}`); },
+          invalidateGeneration() { calls.push(`invalidate:${language}:${now}`); },
           clearQueue() { calls.push(`clear:${language}:${now}`); },
           async waitForPlayout() {
             calls.push(`wait:${language}`);
@@ -334,6 +335,7 @@ test("handoff clears stale translation within 200ms without draining old playout
 test("handoff clears audio enqueued by a capture that was already pending at the generation fence", async () => {
   const clients = [];
   const queues = new Map();
+  const invalidated = new WeakSet();
   const captureEntered = deferredForBridgeTest();
   const releaseCapture = deferredForBridgeTest();
   const bridge = new LiveTranslationBridge({
@@ -343,13 +345,16 @@ test("handoff clears audio enqueued by a capture that was already pending at the
         const queue = [];
         queues.set(language, queue);
         return {
-          async capture(pcm) {
+          async capture(pcm, generation) {
             if (language === "ko" && pcm.readInt16LE(0) === 7) {
               captureEntered.resolve();
               await releaseCapture.promise;
             }
+            if (invalidated.has(generation)) return { committed: false };
             queue.push(pcm.readInt16LE(0));
+            return { committed: true };
           },
+          invalidateGeneration(generation) { invalidated.add(generation); queue.length = 0; },
           clearQueue() { queue.length = 0; },
           queuedDurationMs() { return queue.length * 20; },
         };
@@ -382,6 +387,70 @@ test("handoff clears audio enqueued by a capture that was already pending at the
 
   assert.deepEqual(queues.get("ko"), []);
   assert.equal(clients.length, 2);
+  await bridge.abort();
+});
+
+test("a 220ms old capture cannot delay handoff or commit after its generation is invalidated", async () => {
+  const clients = [];
+  const queues = new Map();
+  const captureEntered = deferredForBridgeTest();
+  const invalidated = new WeakSet();
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    audioGateway: {
+      async translationSink(language) {
+        const queue = [];
+        queues.set(language, queue);
+        let commitChain = Promise.resolve();
+        return {
+          capture(pcm, generation) {
+            const commit = commitChain.then(async () => {
+              if (language === "ko" && pcm.readInt16LE(0) === 7) {
+                captureEntered.resolve();
+                await delayForTest(220);
+              }
+              if (invalidated.has(generation)) return { committed: false };
+              queue.push(pcm.readInt16LE(0));
+              return { committed: true };
+            });
+            commitChain = commit.catch(() => {});
+            return commit;
+          },
+          invalidateGeneration(generation) {
+            invalidated.add(generation);
+            queue.length = 0;
+          },
+          clearQueue() { queue.length = 0; },
+          queuedDurationMs() { return queue.length * 20; },
+        };
+      },
+      async subscribeOriginal() { return { async close() {} }; },
+    },
+    geminiFactory(options) {
+      const client = {
+        connect() { options.onSetupComplete(); },
+        sendActivityStart() { return true; },
+        sendActivityEnd() { return true; },
+        sendPcm16() { return true; },
+        close() {},
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" }, { utteranceId: "utterance-1" });
+  const oldCapture = clients[0].options.onTranslatedAudio(Buffer.from([7, 0]).toString("base64"));
+  await captureEntered.promise;
+  const handoffStartedAt = performance.now();
+  await bridge.handoff({ id: "ko-1", language: "ko" }, { utteranceId: "utterance-2" });
+  const handoffElapsedMilliseconds = performance.now() - handoffStartedAt;
+  await clients[1].options.onTranslatedAudio(Buffer.from([8, 0]).toString("base64"));
+  await oldCapture;
+
+  assert.equal(handoffElapsedMilliseconds <= 200, true);
+  assert.deepEqual(queues.get("ko"), []);
+  assert.deepEqual(queues.get("ja"), [8]);
   await bridge.abort();
 });
 
@@ -574,6 +643,8 @@ test("abort cancels and awaits a pending recovery replacement without orphan ret
 test("abort closes the provider before bounded cleanup abandons a pending capture", async () => {
   const clients = [];
   const availability = [];
+  const queued = [];
+  const invalidated = new WeakSet();
   const captureEntered = deferredForBridgeTest();
   const releaseCapture = deferredForBridgeTest();
   const bridge = new LiveTranslationBridge({
@@ -584,10 +655,12 @@ test("abort closes the provider before bounded cleanup abandons a pending captur
     audioGateway: {
       async translationSink() {
         return {
-          async capture() {
+          async capture(pcm, generation) {
             captureEntered.resolve();
             await releaseCapture.promise;
+            if (!invalidated.has(generation)) queued.push(pcm.readInt16LE(0));
           },
+          invalidateGeneration(generation) { invalidated.add(generation); },
           clearQueue() {},
         };
       },
@@ -607,7 +680,7 @@ test("abort closes the provider before bounded cleanup abandons a pending captur
   });
 
   await bridge.start({ id: "ja-1", language: "ja" });
-  void clients[0].options.onTranslatedAudio(Buffer.from([7, 0]).toString("base64"));
+  const pendingCapture = clients[0].options.onTranslatedAudio(Buffer.from([7, 0]).toString("base64"));
   await captureEntered.promise;
   clients[0].options.onError(new Error("provider disconnected"));
   await waitUntil(() => availability.at(-1) === "reconnecting");
@@ -621,7 +694,9 @@ test("abort closes the provider before bounded cleanup abandons a pending captur
   assert.equal(clients[0].client.closed, true);
   assert.equal(clients.length, 1);
   releaseCapture.resolve();
+  await pendingCapture;
   await abort;
+  assert.deepEqual(queued, []);
 });
 
 test("a fresh start publishes available after an unavailable recovery was aborted", async () => {

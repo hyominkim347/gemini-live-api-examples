@@ -8,6 +8,10 @@ test("timing evidence keeps interruption, reconnect, and accelerated long-sessio
     interruptionMilliseconds: 200,
     reconnectStatusMilliseconds: 1_000,
     staleOutputBlocked: true,
+    handoffPendingCaptureExercised: true,
+    handoffPendingCaptureDelayMilliseconds: 220,
+    handoffOldMarkerQueued: false,
+    handoffNewOutputAccepted: true,
     replacementGapMilliseconds: 500,
     acceleratedMeetingMinutes: 60,
     proactiveReplacement: true,
@@ -15,7 +19,15 @@ test("timing evidence keeps interruption, reconnect, and accelerated long-sessio
   }), {
     ok: true,
     interruption: { ok: true, milliseconds: 200 },
-    reconnect: { ok: true, statusMilliseconds: 1_000, staleOutputBlocked: true },
+    reconnect: {
+      ok: true,
+      statusMilliseconds: 1_000,
+      staleOutputBlocked: true,
+      handoffPendingCaptureExercised: true,
+      handoffPendingCaptureDelayMilliseconds: 220,
+      handoffOldMarkerQueued: false,
+      handoffNewOutputAccepted: true,
+    },
     longSession: {
       ok: true,
       replacementGapMilliseconds: 500,

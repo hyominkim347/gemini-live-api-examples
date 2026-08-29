@@ -169,6 +169,7 @@ export class LiveTranslationBridge {
       }
       preparedInput = this.#preparedInputs.get(speaker.id);
       const sink = await this.#audioGateway.translationSink(targetLanguage);
+      const sinkGeneration = {};
       this.#throwIfAborted(startRevision);
       let active;
       let providerState;
@@ -188,7 +189,7 @@ export class LiveTranslationBridge {
         }
         captureChain = captureChain.then(async () => {
           if (!acceptingOutput || generation !== outputGeneration) return;
-          const capture = await sink.capture(pcm);
+          const capture = await sink.capture(pcm, sinkGeneration);
           if (!acceptingOutput || generation !== outputGeneration) return;
           if (Number.isFinite(capture?.queuedAfterMs)) {
             this.#record("livekit-queue-updated", context, {
@@ -388,6 +389,15 @@ export class LiveTranslationBridge {
       };
       preparedInput.forwardTo(sendInput);
       this.#throwIfAborted(startRevision);
+      const cancelSinkOutput = ({ requireGenerationInvalidation = false } = {}) => {
+        acceptingOutput = false;
+        outputGeneration += 1;
+        if (requireGenerationInvalidation && typeof sink.invalidateGeneration !== "function") {
+          throw new Error("translation sink invalidateGeneration is required for handoff");
+        }
+        sink.invalidateGeneration?.(sinkGeneration);
+        sink.clearQueue?.();
+      };
       active = {
         context,
         gemini,
@@ -399,16 +409,14 @@ export class LiveTranslationBridge {
         pauseInput() { acceptingInput = false; },
         resumeInput() { acceptingInput = true; },
         detachInput() { preparedInput.bufferInstead(); },
-        async interruptOutput() {
-          acceptingOutput = false;
-          outputGeneration += 1;
-          await settle(captureChain);
+        interruptOutput() {
           if (typeof sink.clearQueue !== "function") {
             throw new Error("translation sink clearQueue is required for handoff");
           }
-          sink.clearQueue();
+          cancelSinkOutput({ requireGenerationInvalidation: true });
           return typeof sink.queuedDurationMs === "function" ? sink.queuedDurationMs() : 0;
         },
+        cancelOutput() { cancelSinkOutput(); },
         resetAudioTurn() {
           audibleInputReceived = false;
           audibleOutputReceived = false;
@@ -569,7 +577,7 @@ export class LiveTranslationBridge {
     active.pauseInput();
     active.detachInput();
     active.cancelAudioDrain();
-    const queueDurationMs = await active.interruptOutput();
+    const queueDurationMs = active.interruptOutput();
     await active.cancelRecovery();
     active.closeProvider();
     const interruptionMilliseconds = Math.max(0, this.#clock() - interruptedAt);
@@ -614,6 +622,7 @@ export class LiveTranslationBridge {
     active.pauseInput();
     active.detachInput();
     active.cancelAudioDrain();
+    active.cancelOutput();
     await active.cancelRecovery();
     active.closeProvider();
     await settle(withTimeout(

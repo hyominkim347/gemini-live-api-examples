@@ -11,6 +11,9 @@ test("automated contract scenarios measure the real bridge transitions", async (
   });
 
   assert.equal(report.ok, true);
+  assert.equal(measurements.interruptionMilliseconds > 0, true);
+  assert.equal(measurements.handoffPendingCaptureDelayMilliseconds, 220);
+  assert.equal(measurements.handoffNewOutputAccepted, true);
   assert.equal(measurements.interruptionMilliseconds <= 200, true);
   assert.equal(measurements.handoffPendingCaptureExercised, true);
   assert.equal(measurements.handoffOldMarkerQueued, false);
@@ -23,6 +26,20 @@ test("automated contract scenarios measure the real bridge transitions", async (
 });
 
 test("automated contract canary fails closed when measured evidence is missing or over limit", async () => {
+  const oldConstantFalsePositive = await runAutomatedContractCanary({
+    runScenarios: async () => ({
+      interruptionMilliseconds: 0,
+      reconnectStatusMilliseconds: 500,
+      staleOutputBlocked: true,
+      replacementGapMilliseconds: 400,
+      acceleratedMeetingMinutes: 60,
+      proactiveReplacement: true,
+      outputContinued: true,
+    }),
+  });
+  assert.equal(oldConstantFalsePositive.ok, false);
+  assert.equal(oldConstantFalsePositive.reconnect.ok, false);
+
   const missing = await runAutomatedContractCanary({
     runScenarios: async () => ({ staleOutputBlocked: true }),
   });

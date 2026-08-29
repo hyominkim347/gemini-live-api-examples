@@ -67,19 +67,43 @@ export class LiveKitAudioGateway {
     }
     this.#record("livekit-publish-succeeded", eventContext, { result: "succeeded" });
     this.#localTracks.push(track);
+    let captureCommitChain = Promise.resolve();
+    const invalidatedGenerations = new WeakSet();
     const sink = {
-      async capture(pcm) {
+      capture(pcm, generation) {
         const bytes = Buffer.isBuffer(pcm) ? pcm : Buffer.from(pcm);
         const copy = Uint8Array.from(bytes);
         const samples = new Int16Array(copy.buffer);
-        const queuedBeforeMs = source.queuedDuration;
-        const startedAt = performance.now();
-        await source.captureFrame(new AudioFrame(samples, 24_000, 1, samples.length));
-        return {
-          queuedBeforeMs,
-          queuedAfterMs: source.queuedDuration,
-          captureWaitMs: performance.now() - startedAt,
-        };
+        const commit = captureCommitChain.then(async () => {
+          const queuedBeforeMs = source.queuedDuration;
+          const startedAt = performance.now();
+          if (generation && invalidatedGenerations.has(generation)) {
+            return {
+              committed: false,
+              queuedBeforeMs,
+              queuedAfterMs: source.queuedDuration,
+              captureWaitMs: performance.now() - startedAt,
+            };
+          }
+          await source.captureFrame(new AudioFrame(samples, 24_000, 1, samples.length));
+          if (generation && invalidatedGenerations.has(generation)) {
+            source.clearQueue();
+            return {
+              committed: false,
+              queuedBeforeMs,
+              queuedAfterMs: source.queuedDuration,
+              captureWaitMs: performance.now() - startedAt,
+            };
+          }
+          return {
+            committed: true,
+            queuedBeforeMs,
+            queuedAfterMs: source.queuedDuration,
+            captureWaitMs: performance.now() - startedAt,
+          };
+        });
+        captureCommitChain = commit.catch(() => {});
+        return commit;
       },
       queuedDurationMs() {
         return source.queuedDuration;
@@ -88,6 +112,10 @@ export class LiveKitAudioGateway {
         return source.waitForPlayout();
       },
       clearQueue() {
+        source.clearQueue();
+      },
+      invalidateGeneration(generation) {
+        invalidatedGenerations.add(generation);
         source.clearQueue();
       },
     };

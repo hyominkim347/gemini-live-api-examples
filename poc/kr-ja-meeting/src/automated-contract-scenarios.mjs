@@ -10,7 +10,8 @@ export async function runAutomatedContractScenarios() {
   let clearedQueues = 0;
   let handoffPendingCaptureExercised = false;
   const handoffCaptureEntered = deferred();
-  const releaseHandoffCapture = deferred();
+  const invalidatedGenerations = new WeakSet();
+  const handoffPendingCaptureDelayMilliseconds = 220;
 
   const bridge = new LiveTranslationBridge({
     meetingId: "automated-contract-canary",
@@ -22,16 +23,27 @@ export async function runAutomatedContractScenarios() {
     eventRecorder: { record(event) { events.push(event); } },
     audioGateway: {
       async translationSink() {
+        let captureCommitChain = Promise.resolve();
         return {
-          async capture(pcm) {
+          capture(pcm, generation) {
             const copy = Buffer.from(pcm);
-            if (!handoffPendingCaptureExercised && copy.equals(Buffer.from([1, 0]))) {
-              handoffPendingCaptureExercised = true;
-              handoffCaptureEntered.resolve();
-              await releaseHandoffCapture.promise;
-            }
-            captured.push(copy);
-            translationQueue.push(copy);
+            const commit = captureCommitChain.then(async () => {
+              if (!handoffPendingCaptureExercised && copy.equals(Buffer.from([1, 0]))) {
+                handoffPendingCaptureExercised = true;
+                handoffCaptureEntered.resolve();
+                await delay(handoffPendingCaptureDelayMilliseconds);
+              }
+              if (invalidatedGenerations.has(generation)) return { committed: false };
+              captured.push(copy);
+              translationQueue.push(copy);
+              return { committed: true };
+            });
+            captureCommitChain = commit.catch(() => {});
+            return commit;
+          },
+          invalidateGeneration(generation) {
+            invalidatedGenerations.add(generation);
+            translationQueue.length = 0;
           },
           clearQueue() { clearedQueues += 1; translationQueue.length = 0; },
           queuedDurationMs() { return 0; },
@@ -61,14 +73,17 @@ export async function runAutomatedContractScenarios() {
   const pendingOldCapture = clients[0].options.onTranslatedAudio(audiblePcmBase64(1));
   await handoffCaptureEntered.promise;
   now = 100;
+  const handoffStartedAt = performance.now();
   const pendingHandoff = bridge.handoff(
     { id: "ko-speaker", language: "ko" },
     { utteranceId: "utterance-2" },
   );
-  releaseHandoffCapture.resolve();
-  await pendingOldCapture;
   const interruption = await pendingHandoff;
+  const observedHandoffMilliseconds = performance.now() - handoffStartedAt;
+  await clients[1].options.onTranslatedAudio(audiblePcmBase64(5));
+  await pendingOldCapture;
   const handoffOldMarkerQueued = translationQueue.some((pcm) => pcm.equals(Buffer.from([1, 0])));
+  const handoffNewOutputAccepted = captured.some((pcm) => pcm.equals(Buffer.from([5, 0])));
   const capturedAfterHandoff = captured.length;
   await clients[0].options.onTranslatedAudio(audiblePcmBase64(1));
   const handoffStaleOutputBlocked = captured.length === capturedAfterHandoff && clearedQueues > 0;
@@ -99,12 +114,16 @@ export async function runAutomatedContractScenarios() {
   const proactiveReplacementEvent = events.find(({ type, reconnectReason }) =>
     type === "gemini-retry-succeeded" && reconnectReason === "go-away-time-left");
   const measurements = {
-    interruptionMilliseconds: interruption.interruptionMilliseconds,
+    interruptionMilliseconds: observedHandoffMilliseconds,
+    bridgeInterruptionMilliseconds: interruption.interruptionMilliseconds,
     handoffPendingCaptureExercised,
+    handoffPendingCaptureDelayMilliseconds,
     handoffOldMarkerQueued,
+    handoffNewOutputAccepted,
     reconnectStatusMilliseconds: reconnecting?.observedAt - providerClosedAt,
     staleOutputBlocked: handoffPendingCaptureExercised
       && !handoffOldMarkerQueued
+      && handoffNewOutputAccepted
       && handoffStaleOutputBlocked
       && recoveryStaleOutputBlocked
       && proactiveStaleOutputBlocked,
@@ -121,6 +140,10 @@ function deferred() {
   let resolve;
   const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function audiblePcmBase64(marker) {
