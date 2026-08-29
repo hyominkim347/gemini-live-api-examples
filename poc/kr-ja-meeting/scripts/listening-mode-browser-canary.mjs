@@ -189,7 +189,12 @@ try {
   assert.deepEqual(modeEvents, ["translation-only", "original-check"]);
   const planModes = await page.evaluate(() => window.__listeningPlanEvents.map(({ mode }) => mode));
   assert.deepEqual(planModes.slice(-3), ["translation-only", "original-check", "translation-only"]);
-  console.log(JSON.stringify({ modeEvents, automaticRestore: "translation-only", audioNodesMatchPlans: true }));
+  console.log(JSON.stringify({
+    modeEvents,
+    translationOnly: true,
+    automaticRestore: "translation-only",
+    audioNodesMatchPlans: true,
+  }));
 } finally {
   await browser.close();
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
