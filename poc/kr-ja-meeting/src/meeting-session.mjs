@@ -1,9 +1,12 @@
+import { ListeningMixController } from "./listening-mix-controller.mjs";
+
 const SUPPORTED_LANGUAGES = new Set(["ko", "ja"]);
 
 export class MeetingSession {
   #participantById = new Map();
   #translationFocusId = null;
   #listenerModes = new Map();
+  #listeningMixController = new ListeningMixController();
 
   constructor(participants = []) {
     if (!Array.isArray(participants)) throw new Error("participants must be an array");
@@ -119,36 +122,26 @@ export class MeetingSession {
   audioPlanFor(listenerId) {
     const listener = this.#requireParticipant(listenerId);
     if (!this.#translationFocusId) {
-      return { original: false, translation: false, trackId: null, mode: "silent" };
+      return { mode: "silent", tracks: [] };
     }
 
     const speaker = this.#activeSpeaker();
     if (listener.id === speaker.id) {
-      return { original: false, translation: false, trackId: null, mode: "speaking" };
-    }
-    if (listener.language === speaker.language) {
-      return {
-        original: true,
-        translation: false,
-        trackId: `original:${speaker.id}`,
-        mode: "same-language-original",
-      };
+      return { mode: "speaking", tracks: [] };
     }
     const requestedMode = this.#listenerModes.get(listenerId);
     if (requestedMode) {
       return {
-        original: true,
-        translation: false,
-        trackId: `original:${speaker.id}`,
         mode: requestedMode,
+        tracks: [{
+          trackId: `original:${speaker.id}`,
+          kind: "original",
+          role: "foreground",
+          gain: 1,
+        }],
       };
     }
-    return {
-      original: false,
-      translation: true,
-      trackId: `translation:${listener.language}`,
-      mode: "translated",
-    };
+    return this.#listeningMixController.planFor({ listener, speaker });
   }
 
   snapshot() {
