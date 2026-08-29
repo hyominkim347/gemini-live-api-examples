@@ -95,7 +95,7 @@ test("the scorer passes a valid Paired Comparison sample", async () => {
   assert.equal(score.metrics.medianTimeReduction, 0.3);
 });
 
-test("the scorer fails each Pilot Pass Gate independently", async (t) => {
+test("the scorer fails each legacy passGate condition used by the Agent Context Pass Gate", async (t) => {
   const benchmark = await loadImpactBenchmark();
 
   await t.test("fewer than 10 correct answers", () => {

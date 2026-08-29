@@ -1,4 +1,11 @@
-# Understand-Anything Developer Lane calibration
+# Understand-Anything Developer Lane 비채점 calibration
+
+## 현재 상태
+
+현재 Adoption Pilot은 Agent-only다. 이 문서는 실제 프로젝트 개발자가 참여할 수 있을
+때 수행할 선택적 후속 calibration 절차를 보존한다. 현재 Agent Context Pass Gate나 Stop
+Rule 판정에는 사용하지 않으며, 기존 smoke 실행도 개발자 효용 또는 dashboard 사용성
+근거가 아니다.
 
 AIN-7640은 AIN-7639가 만든 고정 `Pilot Artifact`를 실제 프로젝트 개발자가 로컬에서
 탐색하고, scored Developer Lane 전에 비채점 calibration 질문 하나에 `Evidence Answer`를
@@ -134,9 +141,9 @@ node poc/kr-ja-meeting/scripts/ua-developer-lane.mjs verify \
 `developer-lane-verification.json`을 남긴다. 모든 결과 파일은 Pilot Artifact 안의 로컬
 session에만 남으며 Git commit 대상이 아니다.
 
-## Scored benchmark 경계
+## 채점 benchmark 경계
 
 이 lane에서 scored 12문항이나 frozen expected answers를 열거나 출력하거나 실행하지
-않는다. AIN-7642의 12문항 Developer Lane은 실제 프로젝트 개발자가 독립적으로 수행할
-별도 작업이다. AIN-7640 구현·smoke 결과를 그 개발자 실행이나 점수로 대리해서는 안
-된다.
+않는다. 12문항 Developer Lane은 실제 프로젝트 개발자가 독립적으로 수행하도록 별도
+승인해야 하는 후속 작업이다. AIN-7642는 현재 Agent-only Pilot에서 canceled다.
+AIN-7640 구현·smoke 결과를 개발자 실행이나 점수로 대리해서는 안 된다.

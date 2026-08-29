@@ -208,7 +208,7 @@ function validateBenchmark(benchmark) {
       throw new Error(`question ${question.id} lacks its sealed expected answer`);
     }
   }
-  requireObject(benchmark.passGate, "frozen Pilot Pass Gate");
+  requireObject(benchmark.passGate, "frozen legacy passGate contract");
 }
 
 async function loadFrozenControl() {

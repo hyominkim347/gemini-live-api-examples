@@ -1,12 +1,20 @@
-# Understand-Anything Developer Lane Paired Comparison handoff
+# Understand-Anything Developer Lane Paired Comparison 인계 절차
 
-AIN-7642의 `Developer Lane`은 실제 프로젝트 개발자 한 명이 동결된 12개
-`Impact Question`을 Understand-Anything dashboard와 `rg`로 각각 답하는
-`Paired Comparison`이다. 이 문서는 `Pilot Operator`가 로컬 실행 surface를 준비한 뒤
-답을 쓰지 않고 개발자에게 넘기는 절차를 고정한다.
+## 현재 상태
+
+현재 Adoption Pilot은 Agent-only로 범위를 변경했다. AIN-7642는 현재 Pilot에서
+canceled이며 Agent Context Pass Gate 또는 Stop Rule 판정에 필요하지 않다. 사람 개발자
+효용을 검증하기로 별도 결정할 때만 이 문서를 선택적 후속 절차로 사용한다.
+
+`Developer Lane`은 실제 프로젝트 개발자 한 명이 동결된 12개 `Impact Question`을
+Understand-Anything dashboard와 `rg`로 각각 답하는 `Paired Comparison`이다. 이 문서는
+`Pilot Operator`가 로컬 실행 surface를 준비한 뒤 답을 쓰지 않고 개발자에게 넘기는
+절차를 고정한다.
 
 이 runner의 구현과 테스트는 실제 개발자 실행을 대체하지 않는다. 프로젝트 개발자의
-신원·독립 작성 attestation과 24개 raw answer가 없으면 AIN-7642는 완료가 아니다.
+신원·독립 작성 attestation과 24개 raw answer가 없으면 Developer Lane 후속 검증을
+완료했다고 주장할 수 없다. Codex가 대신 실행한 결과는 Agent Lane이며 개발자 효용
+근거가 아니다.
 
 ## 고정 조건
 

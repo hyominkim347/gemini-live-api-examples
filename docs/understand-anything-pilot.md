@@ -1,69 +1,81 @@
-# Understand-Anything Code Understanding Pilot
+# Understand-Anything 코드 이해 Pilot
 
-## Goal
+## 목표
 
-Evaluate whether Understand-Anything helps a Codex agent answer code-change impact questions more accurately and quickly than repository search alone.
+Understand-Anything이 Codex agent의 코드 변경 영향 질문 답변을 repository search만 사용할 때보다 더 정확하고 빠르게 만드는지 평가한다.
 
-## Analysis Boundary
+현재 Pilot은 Agent-only 범위다. 사람 개발자의 효용과 dashboard 사용성은 검증하지 않으며, 도구 rollout이나 표준 채택도 결정하지 않는다.
+
+## 분석 경계
 
 - Analysis Snapshot: `5bf36dd61b6355368d736479c5ffb528b656d544`
-- Include tracked code, documentation, and tests.
-- Exclude ignored, untracked, secret, generated, and dependency files.
-- Use the current Codex model provider without adding credentials or providers.
+- tracked 코드, 문서, 테스트를 포함한다.
+- ignored, untracked, secret, generated, dependency 파일은 제외한다.
+- credential이나 provider를 추가하지 않고 현재 Codex model provider를 사용한다.
 
-## Impact Benchmark
+## Impact Benchmark 구성
 
-Freeze twelve questions and their code and test evidence before running the pilot:
+Pilot 실행 전에 12개 질문과 코드·테스트 근거를 동결한다.
 
-- 3 direct-dependency changes
-- 4 cross-layer changes
-- 3 recovery or privacy changes
-- 2 negative controls where no impact is expected
+- direct-dependency 변경 3개
+- cross-layer 변경 4개
+- recovery 또는 privacy 변경 3개
+- 영향이 없어야 하는 negative control 2개
 
-Every Evidence Answer must name the affected behavior, exact file or symbol, and related test. Use `unknown` instead of guessing.
+모든 Evidence Answer는 영향받는 동작, 정확한 file 또는 symbol, 관련 test를 명시해야 한다. 추측 대신 `unknown`을 사용한다.
 
-## Comparison
+## 비교 방법
 
-Run the Agent Lane comparison against the same Analysis Snapshot, Codex model, time limit, and question set. Use fresh context and cross the execution order.
+동일한 Analysis Snapshot, Codex model, time limit, 질문 집합으로 Agent Lane을 비교한다. fresh context를 사용하고 실행 순서를 교차한다.
 
-- Agent Lane: Understand-Anything graph versus `rg`
+- Agent Lane: Understand-Anything graph와 `rg` 비교
 
-The Developer Lane is an optional later validation for an actual project developer. Codex does not proxy it, and this Agent-only pilot makes no developer-utility or dashboard-usability claim.
+Developer Lane은 실제 프로젝트 개발자가 참여할 수 있을 때 별도로 결정할 선택적 후속 검증이다. AIN-7642는 현재 Agent-only 범위에서 취소한다. Codex는 Developer Lane을 대리하지 않으며, 이번 결과로 개발자 효용이나 dashboard 사용성을 주장하지 않는다.
 
-## Agent Context Pass Gate
+## Agent Context Pass Gate 기준
 
-The Agent Lane must achieve all four conditions:
+Agent Lane은 다음 네 조건을 모두 충족해야 한다.
 
-- at least 10 correct answers out of 12
-- evidence links for all 12 answers
-- zero invented files or relationships
-- at least 25% lower median answer time
+- correct answer가 12개 중 10개 이상임
+- 12개 답변 모두에 evidence link가 있음
+- invented file 또는 relationship이 0개임
+- 답변 시간 중앙값이 25% 이상 감소함
 
-Missing any condition activates the Stop Rule. Do not relax thresholds, expected answers, evidence criteria, or raw results after observing results.
+하나라도 충족하지 못하면 Stop Rule을 적용한다. 결과를 확인한 뒤 threshold, expected answer, evidence criteria, raw result를 완화하거나 변경하지 않는다.
 
-## Operating Policy
+현재 동결 결과에서는 Stop Rule이 적용되었다. AIN-7644의 최종 판정은 다음 측정값을
+그대로 기록하며, 이 도구는 Agent Context Candidate가 아니고 rollout하지 않는다.
 
-- One full analysis may take at most 30 minutes.
-- An Incremental Refresh may take at most 5 minutes.
-- Codex prepares the analysis, runs the Agent Lane, and applies the frozen gate.
-- Pilot Artifacts remain local with no commit, CI, schedule, or background automation.
-- Keep artifacts and timing records until the pilot result is accepted. Cleanup requires a separate explicit decision.
+- correct answer: 0/12
+- verified code/test evidence: 0/12
+- invented file: 0
+- invented relation: 0
+- graph answer time median: 36,840.065ms
+- `rg` answer time median: 33,217.775ms
+- median time reduction: -10.9% (graph arm이 더 느림)
 
-## Local Graph Adapter
+## 운영 정책
 
-AIN-7639 uses `poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs` as a
-fail-closed adapter around the reviewed upstream source. It pins:
+- full analysis 1회는 최대 30분이다.
+- Incremental Refresh 1회는 최대 5분이다.
+- Codex가 분석을 준비하고 Agent Lane을 실행한 뒤 동결된 gate를 적용한다.
+- Pilot Artifact는 로컬에만 두며 commit, CI, schedule, background automation을 사용하지 않는다.
+- 결과가 수용될 때까지 artifact와 timing record를 보존한다. Cleanup에는 별도의 명시적 결정이 필요하다.
+
+## 로컬 graph adapter
+
+AIN-7639는 검토한 upstream source를 감싸는 fail-closed adapter로
+`poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs`를 사용한다. 다음 항목을 고정한다.
 
 - Analysis Snapshot: `5bf36dd61b6355368d736479c5ffb528b656d544`
 - Understand-Anything: `ba450c43425f3de6d43daf76526950ad8ca93536`
-- full analysis budget: 30 minutes
-- Incremental Refresh budget: 5 minutes
+- full analysis budget: 30분
+- Incremental Refresh budget: 5분
 
-The adapter never runs the upstream global installer, creates no skill
-symlinks or hooks, and writes only under the ignored `.ua-pilot/` directory.
-Give `prepare` either the reviewed local upstream checkout or the official
-repository URL. Existing artifact checkouts are not overwritten when their
-HEAD differs from the pin.
+adapter는 upstream global installer를 실행하거나 skill symlink 또는 hook을 만들지 않는다.
+ignored `.ua-pilot/` 디렉터리 아래에만 기록한다. `prepare`에는 검토한 로컬 upstream
+checkout 또는 공식 repository URL을 전달한다. 기존 artifact checkout의 HEAD가 pin과
+다르면 덮어쓰지 않는다.
 
 ```bash
 node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs prepare \
@@ -72,43 +84,39 @@ node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs prepare \
   --upstream-source /absolute/path/to/reviewed/Understand-Anything
 ```
 
-Run the generated `codex-prompt.md` only with the current Codex provider and
-`UNDERSTAND_NO_WORKTREE_REDIRECT=1`. The plan limits dependency installation
-and the core build to the pinned artifact-local checkout. The prompt fixes
-`--full`, `--language ko`, and `--no-auto-update`; automatic refresh is outside
-this pilot.
+생성된 `codex-prompt.md`는 현재 Codex provider와
+`UNDERSTAND_NO_WORKTREE_REDIRECT=1`만 사용해 실행한다. plan은 dependency 설치와 core
+build를 고정된 artifact-local checkout으로 제한한다. prompt는 `--full`,
+`--language ko`, `--no-auto-update`를 고정하며 automatic refresh는 현재 Pilot 범위 밖이다.
 
-After upstream scanning, require exact inventory equality:
+upstream scanning 뒤에는 inventory가 정확히 일치해야 한다.
 
 ```bash
 node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs verify-scan \
   --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
 ```
 
-`prepare` initializes `run-metrics.json` and `calibration-answer.json` with
-`not-run` states. Replace those states only with observed local evidence, then
-run `verify-artifact`. It rejects a missing or wrong graph revision, missing
-fingerprints, corpus drift, calibration evidence that does not resolve to graph
-nodes, an unmeasured run, or either time-budget overrun. A prepared corpus or
-deterministic scan alone is not a passing pilot.
+`prepare`는 `run-metrics.json`과 `calibration-answer.json`을 `not-run` 상태로
+초기화한다. 관찰한 로컬 근거가 있을 때만 해당 상태를 바꾸고 `verify-artifact`를
+실행한다. graph revision 누락 또는 불일치, fingerprint 누락, corpus drift, graph node로
+확인되지 않는 calibration 근거, 측정되지 않은 실행, time budget 초과가 있으면
+거부한다. corpus 준비나 deterministic scan만으로는 Pilot 통과가 아니다.
 
 ```bash
 node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs verify-artifact \
   --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
 ```
 
-## Agent-only Adjudication
+## Agent-only 판정
 
-The adjudicator pins the frozen `impact-benchmark-v1` bytes at SHA-256
+판정기는 동결된 `impact-benchmark-v1` bytes의 SHA-256을
 `753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6`
-and the AIN-7643 raw result bytes at SHA-256
-`6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0`.
-It counts an answer as correct only when grounded raw evidence contains every
-frozen expected code and test item. `unsupported`, `unknown`, unverified, or
-invented evidence never counts in favor of the graph arm.
-The scorer revision is `agent-only-gate-v1`; its output records that revision,
-the input/output contract revisions, and each question's matched and missing
-frozen code and test evidence.
+로, AIN-7643 raw result bytes의 SHA-256을
+`6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0`로 고정한다.
+grounded raw evidence가 동결된 expected code와 test 항목을 모두 포함할 때만 정답으로
+센다. `unsupported`, `unknown`, unverified, invented evidence는 graph arm에 유리하게
+계산하지 않는다. scorer revision은 `agent-only-gate-v1`이다. 출력에는 해당 revision,
+input/output contract revision, 질문별 일치 및 누락된 동결 code/test evidence를 기록한다.
 
 ```bash
 npm run pilot:adjudicate-agent -- \
@@ -116,8 +124,7 @@ npm run pilot:adjudicate-agent -- \
   --output /absolute/path/to/repository/.ua-pilot/agent-only-gate/adjudication.json
 ```
 
-The ignored local result records exactly one routing value: `Agent Context Candidate`
-when all four conditions pass, otherwise `Stop Rule`. It also retains the frozen
-input digests, per-question evidence comparison, and timing metrics needed to
-reproduce the decision. Neither value is a developer-utility, dashboard-usability,
-permanent-adoption, rollout, or production-readiness claim.
+ignored 로컬 결과는 네 조건을 모두 충족하면 `Agent Context Candidate`, 아니면
+`Stop Rule`이라는 routing value 하나만 기록한다. 결정 재현에 필요한 동결 input digest,
+질문별 evidence comparison, timing metric도 보존한다. 어느 값도 개발자 효용, dashboard
+사용성, permanent adoption, rollout, production readiness를 뜻하지 않는다.
