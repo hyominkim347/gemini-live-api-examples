@@ -20,8 +20,24 @@ export function createMeetingHttpServer({ service, staticRoot, vendorFiles = new
         return sendJson(response, 200, service.snapshot());
       }
       if (request.method === "POST" && url.pathname === "/api/meeting/join") {
+        const { name, language } = await readJson(request);
+        return sendJson(response, 200, await service.join({ name, language }));
+      }
+      if (request.method === "POST" && url.pathname === "/api/meeting/leave") {
         const { participantId } = await readJson(request);
-        return sendJson(response, 200, await service.join(participantId));
+        return sendJson(response, 200, await service.leave(participantId));
+      }
+      if (request.method === "POST" && url.pathname === "/api/meeting/mic") {
+        const { participantId, enabled } = await readJson(request);
+        return sendJson(response, 200, await service.mic(participantId, enabled));
+      }
+      if (request.method === "POST" && url.pathname === "/api/meeting/speech") {
+        const { participantId, type, observedAt } = await readJson(request);
+        return sendJson(
+          response,
+          200,
+          await service.speechActivity({ participantId, type, observedAt }),
+        );
       }
       if (request.method === "POST" && url.pathname === "/api/meeting/action") {
         const { participantId, action } = await readJson(request);

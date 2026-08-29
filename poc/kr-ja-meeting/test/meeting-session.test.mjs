@@ -3,74 +3,69 @@ import test from "node:test";
 
 import { MeetingSession } from "../src/meeting-session.mjs";
 
-const PARTICIPANTS = [
-  { id: "ko-1", name: "한국 1", language: "ko" },
-  { id: "ko-2", name: "한국 2", language: "ko" },
-  { id: "ja-1", name: "日本 1", language: "ja" },
-  { id: "ja-2", name: "日本 2", language: "ja" },
-];
+test("dynamic roster keeps microphone and speech as separate state", () => {
+  const session = new MeetingSession();
+  session.join({ id: "ja-1", name: "Yuki", language: "ja" });
 
-test("foreign listeners hear translation only and return from original at a phrase boundary", () => {
-  const session = new MeetingSession(PARTICIPANTS);
+  session.setMicrophone("ja-1", true);
+  assert.deepEqual(session.snapshot().participants[0], {
+    id: "ja-1",
+    name: "Yuki",
+    language: "ja",
+    microphone: "unmuted",
+    speech: "silent",
+    utteranceId: null,
+    audio: { original: false, translation: false, trackId: null, mode: "silent" },
+  });
 
-  session.startSpeaking("ja-1");
+  session.startSpeech("ja-1", "utterance-1");
+  assert.equal(session.snapshot().participants[0].speech, "speaking");
+  session.endSpeech("ja-1");
+  assert.equal(session.snapshot().participants[0].microphone, "unmuted");
+  assert.equal(session.snapshot().participants[0].speech, "silent");
+});
+
+test("join and leave change the roster without a four-person constraint", () => {
+  const session = new MeetingSession();
+  session.join({ id: "ja-1", name: "Yuki", language: "ja" });
+  session.join({ id: "ko-1", name: "민준", language: "ko" });
+  assert.deepEqual(session.participants.map(({ id }) => id), ["ja-1", "ko-1"]);
+
+  session.leave("ja-1");
+  assert.deepEqual(session.participants.map(({ id }) => id), ["ko-1"]);
+});
+
+test("one automatic speaker still produces the existing listener audio plan", () => {
+  const session = new MeetingSession([
+    { id: "ja-1", name: "Yuki", language: "ja" },
+    { id: "ko-1", name: "민준", language: "ko" },
+    { id: "ja-2", name: "Sora", language: "ja" },
+  ]);
+  session.setMicrophone("ja-1", true);
+  session.startSpeech("ja-1", "utterance-1");
+
   assert.deepEqual(session.audioPlanFor("ko-1"), {
     original: false,
     translation: true,
     trackId: "translation:ko",
     mode: "translated",
   });
-
-  session.holdOriginal("ko-1");
-  assert.deepEqual(session.audioPlanFor("ko-1"), {
+  assert.deepEqual(session.audioPlanFor("ja-2"), {
     original: true,
     translation: false,
     trackId: "original:ja-1",
-    mode: "original",
-  });
-
-  session.releaseOriginal("ko-1");
-  assert.equal(session.audioPlanFor("ko-1").mode, "original-until-boundary");
-
-  session.phraseBoundary();
-  assert.deepEqual(session.audioPlanFor("ko-1"), {
-    original: false,
-    translation: true,
-    trackId: "translation:ko",
-    mode: "translated",
-  });
-});
-
-test("the session admits the fixed four-person cohort and rejects overlapping speakers", () => {
-  const session = new MeetingSession(PARTICIPANTS);
-
-  assert.equal(session.participants.length, 4);
-  session.startSpeaking("ko-2");
-  assert.throws(
-    () => session.startSpeaking("ja-2"),
-    /ko-2 is already speaking/,
-  );
-
-  assert.deepEqual(session.audioPlanFor("ja-2"), {
-    original: false,
-    translation: true,
-    trackId: "translation:ja",
-    mode: "translated",
-  });
-  assert.deepEqual(session.audioPlanFor("ko-1"), {
-    original: true,
-    translation: false,
-    trackId: "original:ko-2",
     mode: "same-language-original",
   });
 });
 
-test("starting the active speaker again is idempotent and preserves listener mode", () => {
-  const session = new MeetingSession(PARTICIPANTS);
-  session.startSpeaking("ja-1");
-  session.holdOriginal("ko-1");
+test("mic off ends speech but does not remove the participant", () => {
+  const session = new MeetingSession([{ id: "ja-1", name: "Yuki", language: "ja" }]);
+  session.setMicrophone("ja-1", true);
+  session.startSpeech("ja-1", "utterance-1");
 
-  session.startSpeaking("ja-1");
+  session.setMicrophone("ja-1", false);
 
-  assert.equal(session.audioPlanFor("ko-1").mode, "original");
+  assert.equal(session.activeSpeakerId, null);
+  assert.equal(session.participants[0].microphone, "muted");
+  assert.equal(session.participants[0].speech, "silent");
 });
