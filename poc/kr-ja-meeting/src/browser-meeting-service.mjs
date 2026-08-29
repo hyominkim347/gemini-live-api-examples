@@ -15,6 +15,7 @@ export class BrowserMeetingService {
   #utteranceIdFactory;
   #session = new MeetingSession();
   #translationFocusPolicy;
+  #onListeningEvent;
   #actionChain = Promise.resolve();
 
   constructor({
@@ -27,6 +28,7 @@ export class BrowserMeetingService {
     clock = () => Date.now(),
     minimumFocusHoldMilliseconds,
     overlapWarningMilliseconds,
+    onListeningEvent = () => {},
   }) {
     if (!roomName || !livekitUrl || !tokenIssuer || !translationBridge) {
       throw new Error("roomName, livekitUrl, tokenIssuer, and translationBridge are required");
@@ -42,6 +44,8 @@ export class BrowserMeetingService {
       minimumFocusHoldMilliseconds,
       overlapWarningMilliseconds,
     });
+    if (typeof onListeningEvent !== "function") throw new Error("onListeningEvent must be a function");
+    this.#onListeningEvent = onListeningEvent;
   }
 
   join({ name, language } = {}) {
@@ -136,24 +140,35 @@ export class BrowserMeetingService {
     };
   }
 
+  listeningMode(participantId, mode) {
+    return this.#enqueue(async () => {
+      const change = this.#session.setListeningMode(participantId, mode);
+      if (change.changed) {
+        this.#emitListeningEvent({
+          type: "listening-mode-changed",
+          participantId,
+          previousMode: change.previousMode,
+          mode: change.mode,
+        });
+      }
+      return this.snapshot();
+    });
+  }
+
   action(participantId, action) {
     return this.#enqueue(async () => {
       this.#session.participant(participantId);
-      if (action === "hold-original") {
-        this.#session.holdOriginal(participantId);
-      } else if (action === "release-original") {
-        this.#session.releaseOriginal(participantId);
-      } else {
-        throw new Error(`unsupported meeting action: ${action}`);
-      }
-      return this.snapshot();
+      throw new Error(`unsupported meeting action: ${action}`);
     });
   }
 
   async #endSpeech(participantId, observedAt) {
     const wasFocused = this.#session.translationFocusId === participantId;
     const previousUtteranceId = wasFocused ? this.#session.activeUtteranceId : null;
-    this.#session.endSpeech(participantId);
+    const restoredListeningModes = this.#session.endSpeech(participantId);
+    for (const restored of restoredListeningModes) {
+      this.#emitListeningEvent({ type: "listening-mode-restored", ...restored });
+    }
     const focus = this.#translationFocusPolicy.speechEnded(participantId);
     if (!wasFocused) return;
     try {
@@ -189,5 +204,13 @@ export class BrowserMeetingService {
     const execution = this.#actionChain.then(operation);
     this.#actionChain = execution.catch(() => {});
     return execution;
+  }
+
+  #emitListeningEvent(event) {
+    try {
+      this.#onListeningEvent(event);
+    } catch {
+      // Observability hooks cannot change the meeting contract.
+    }
   }
 }

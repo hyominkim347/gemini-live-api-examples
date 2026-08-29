@@ -34,3 +34,21 @@ test("foreign speech keeps original quieter than the foreground translation", ()
   assert.ok(original.gain < translation.gain);
   assert.equal(translation.gain, 1);
 });
+
+test("foreign speech can use translation-only or temporary original-check plans", () => {
+  const listener = { id: "ko-listener", language: "ko" };
+  const speaker = { id: "ja-speaker", language: "ja" };
+
+  assert.deepEqual(controller.planFor({ listener, speaker, mode: "translation-only" }), {
+    mode: "translation-only",
+    tracks: [
+      { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
+    ],
+  });
+  assert.deepEqual(controller.planFor({ listener, speaker, mode: "original-check" }), {
+    mode: "original-check",
+    tracks: [
+      { trackId: "original:ja-speaker", kind: "original", role: "foreground", gain: 1 },
+    ],
+  });
+});

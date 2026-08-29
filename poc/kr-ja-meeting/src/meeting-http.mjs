@@ -39,6 +39,10 @@ export function createMeetingHttpServer({ service, staticRoot, vendorFiles = new
           await service.speechActivity({ participantId, type, observedAt }),
         );
       }
+      if (request.method === "POST" && url.pathname === "/api/meeting/listening-mode") {
+        const { participantId, mode } = await readJson(request);
+        return sendJson(response, 200, await service.listeningMode(participantId, mode));
+      }
       if (request.method === "POST" && url.pathname === "/api/meeting/action") {
         const { participantId, action } = await readJson(request);
         return sendJson(response, 200, await service.action(participantId, action));

@@ -6,6 +6,7 @@
   "scripts": {
     "canary:browser-playout": "node scripts/browser-playout-canary.mjs",
     "canary:listening-mix": "node scripts/listening-mix-browser-canary.mjs",
+    "canary:listening-modes": "node scripts/listening-mode-browser-canary.mjs",
     "canary:natural-conversation": "node scripts/natural-conversation-browser-canary.mjs",
     "canary:provider-browser": "node scripts/provider-browser-playout-canary.mjs",
     "canary:provider": "node scripts/provider-canary.mjs",
