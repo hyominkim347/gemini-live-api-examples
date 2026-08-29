@@ -294,6 +294,64 @@ writeFileSync(args[outputIndex + 1], JSON.stringify(${JSON.stringify({
   }
 });
 
+test("calibration fails closed when a timed-out Codex child exits zero on SIGTERM", async () => {
+  const paths = await fixture(homedir());
+  const fakeCodex = resolve(paths.root, "fake-codex-timeout.mjs");
+  const fakeSource = `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`;
+  try {
+    await writeFile(fakeCodex, fakeSource, "utf8");
+    await chmod(fakeCodex, 0o700);
+
+    await assert.rejects(
+      runCalibration({
+        pilotArtifactRoot: paths.pilotArtifactRoot,
+        outputDir: paths.outputDir,
+        codexExecutable: fakeCodex,
+        timeoutMs: 500,
+        ...paths.dependencies,
+      }),
+      /timed out/,
+    );
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("calibration fails closed when Codex exceeds its output buffer and exits zero", async () => {
+  const paths = await fixture(homedir());
+  const fakeCodex = resolve(paths.root, "fake-codex-output-overflow.mjs");
+  const answer = validAnswer(paths);
+  const fakeSource = `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputIndex = args.indexOf("--output-last-message");
+writeFileSync(args[outputIndex + 1], JSON.stringify(${JSON.stringify(answer)}));
+process.on("SIGTERM", () => process.exit(0));
+process.stdout.write(Buffer.alloc(33 * 1024 * 1024, 120));
+setInterval(() => {}, 1000);
+`;
+  try {
+    await writeFile(fakeCodex, fakeSource, "utf8");
+    await chmod(fakeCodex, 0o700);
+
+    await assert.rejects(
+      runCalibration({
+        pilotArtifactRoot: paths.pilotArtifactRoot,
+        outputDir: paths.outputDir,
+        codexExecutable: fakeCodex,
+        timeoutMs: 5_000,
+        ...paths.dependencies,
+      }),
+      /output exceeded|maxBuffer|execution error/,
+    );
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 test("calibration post-run writes stay on the canonical approved output after an alias swap", async () => {
   const paths = await fixture(homedir());
   const approvedOutput = paths.outputDir;

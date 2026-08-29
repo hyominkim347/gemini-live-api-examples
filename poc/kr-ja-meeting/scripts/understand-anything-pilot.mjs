@@ -2,7 +2,7 @@
 
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ import {
   buildCodexChildEnv,
   loadVerifiedPilotArtifact,
   requireApprovedPilotOutput,
+  runProcessGroupWithTimeout,
 } from "./pilot-local-safety.mjs";
 
 export const ANALYSIS_SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
@@ -53,23 +54,7 @@ function git(repo, args) {
   return result.stdout;
 }
 
-function signalProcessTree(child, signal) {
-  if (child.pid && process.platform !== "win32") {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch (error) {
-      if (error.code !== "ESRCH") throw error;
-    }
-  }
-  try {
-    child.kill(signal);
-  } catch (error) {
-    if (error.code !== "ESRCH") throw error;
-  }
-}
-
-export function runBudgetedPilotPhase({
+export async function runBudgetedPilotPhase({
   phase,
   budgetMilliseconds,
   command,
@@ -94,49 +79,35 @@ export function runBudgetedPilotPhase({
 
   const startedAt = new Date().toISOString();
   const started = performance.now();
-  const child = spawn(command[0], command.slice(1), {
+  const child = await runProcessGroupWithTimeout({
+    executable: command[0],
+    args: command.slice(1),
     cwd,
     env,
-    stdio: [stdinText === undefined ? "inherit" : "pipe", "inherit", "inherit"],
-    detached: process.platform !== "win32",
+    input: stdinText,
+    timeoutMs: budgetMilliseconds,
+    killGraceMilliseconds,
+    output: "inherit",
   });
-  if (stdinText !== undefined) child.stdin.end(stdinText);
-
-  return new Promise((resolveMetric) => {
-    let timedOut = false;
-    let settled = false;
-    let forceKillTimer;
-    const budgetTimer = setTimeout(() => {
-      timedOut = true;
-      signalProcessTree(child, "SIGTERM");
-      forceKillTimer = setTimeout(() => signalProcessTree(child, "SIGKILL"), killGraceMilliseconds);
-    }, budgetMilliseconds);
-
-    const finish = ({ exitCode = null, signal = null, spawnError = null }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(budgetTimer);
-      clearTimeout(forceKillTimer);
-      const elapsedMilliseconds = Math.round((performance.now() - started) * 1_000) / 1_000;
-      resolveMetric({
-        status: timedOut ? "timed-out" : exitCode === 0 ? "completed" : "failed",
-        phase,
-        measurement: BUDGET_MEASUREMENT,
-        budgetMilliseconds,
-        elapsedMilliseconds,
-        timedOut,
-        exitCode,
-        signal,
-        spawnError,
-        commandSha256: createHash("sha256").update(JSON.stringify(command)).digest("hex"),
-        startedAt,
-        finishedAt: new Date().toISOString(),
-      });
-    };
-
-    child.once("error", (error) => finish({ spawnError: error.message }));
-    child.once("close", (exitCode, signal) => finish({ exitCode, signal }));
-  });
+  const elapsedMilliseconds = Math.round((performance.now() - started) * 1_000) / 1_000;
+  return {
+    status: child.timedOut
+      ? "timed-out"
+      : child.error || child.status !== 0
+        ? "failed"
+        : "completed",
+    phase,
+    measurement: BUDGET_MEASUREMENT,
+    budgetMilliseconds,
+    elapsedMilliseconds,
+    timedOut: child.timedOut,
+    exitCode: child.status,
+    signal: child.signal,
+    spawnError: child.error?.message ?? null,
+    commandSha256: createHash("sha256").update(JSON.stringify(command)).digest("hex"),
+    startedAt,
+    finishedAt: new Date().toISOString(),
+  };
 }
 
 async function pathExists(path) {

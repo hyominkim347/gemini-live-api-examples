@@ -625,6 +625,8 @@ async function materializeRawResult({
     execution.provider !== PROVIDER ||
     execution.freshContext !== true ||
     execution.timeoutMs !== plan.timeoutMs ||
+    execution.timedOut !== false ||
+    execution.processError !== null ||
     execution.exitCode !== 0
   ) {
     throw new Error(`Execution policy mismatch for ${run.runId}`);
@@ -686,7 +688,7 @@ export async function runAgentComparison({
     process.stdout.write(`${JSON.stringify({ event: "run-started", runId: run.runId, sequence: run.sequence, arm: run.arm })}\n`);
     const startedAt = new Date().toISOString();
     const start = performance.now();
-    const launched = spawnCodexChild({
+    const launched = await spawnCodexChild({
       executable: codexExecutable,
       args,
       prompt,
@@ -704,8 +706,16 @@ export async function runAgentComparison({
       answerTimeMs,
       exitCode: launched.status,
       signal: launched.signal,
+      timedOut: launched.timedOut,
+      processError: launched.error?.code ?? (launched.error ? "UNKNOWN" : null),
     };
     await writeFile(resolve(runRoot, "execution.json"), `${JSON.stringify(execution, null, 2)}\n`, "utf8");
+    if (launched.timedOut) {
+      throw new Error(`Fresh Codex run ${run.runId} timed out after ${run.timeoutMs}ms`);
+    }
+    if (launched.error) {
+      throw new Error(`Fresh Codex run ${run.runId} execution error (${execution.processError})`);
+    }
     if (launched.status !== 0) {
       throw new Error(`Fresh Codex run ${run.runId} exited ${launched.status ?? launched.signal ?? "without status"}`);
     }

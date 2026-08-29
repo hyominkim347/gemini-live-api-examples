@@ -385,7 +385,7 @@ export async function runCalibration({
   });
   const startedAt = new Date().toISOString();
   const start = performance.now();
-  const result = spawnCodexChild({
+  const result = await spawnCodexChild({
     executable: codexExecutable,
     args,
     prompt,
@@ -394,9 +394,10 @@ export async function runCalibration({
   const answerTimeMs = Math.round((performance.now() - start) * 100) / 100;
   const finishedAt = new Date().toISOString();
   const executionPath = resolve(resultRoot, "calibration-execution.json");
-  if (result.status !== 0) {
+  if (result.error || result.timedOut || result.status !== 0) {
+    const processError = result.error?.code ?? (result.error ? "UNKNOWN" : null);
     await writeFile(executionPath, `${JSON.stringify({
-      status: "failed",
+      status: result.timedOut ? "timed-out" : "failed",
       provider: PROVIDER,
       freshContext: true,
       startedAt,
@@ -404,7 +405,15 @@ export async function runCalibration({
       answerTimeMs,
       exitCode: result.status,
       signal: result.signal,
+      timedOut: result.timedOut,
+      processError,
     }, null, 2)}\n`, "utf8");
+    if (result.timedOut) {
+      throw new Error(`fresh Codex calibration timed out after ${timeoutMs}ms`);
+    }
+    if (result.error) {
+      throw new Error(`fresh Codex calibration execution error (${processError})`);
+    }
     throw new Error(`fresh Codex calibration failed with exit ${result.status ?? result.signal ?? "unknown"}`);
   }
   const answer = await readJson(prepared.answerPath);
@@ -435,6 +444,8 @@ export async function runCalibration({
       finishedAt,
       answerTimeMs,
       exitCode: 0,
+      timedOut: false,
+      processError: null,
       scored: false,
     }, null, 2)}\n`, "utf8"),
   ]);

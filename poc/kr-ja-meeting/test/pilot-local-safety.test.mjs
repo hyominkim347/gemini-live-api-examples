@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -15,7 +15,9 @@ import {
   initializeEmptyPilotOutput,
   loadVerifiedPilotArtifact,
   requireApprovedPilotOutput,
+  requirePosixProcessGroups,
   requirePilotChildDirectory,
+  spawnCodexChild,
 } from "../scripts/pilot-local-safety.mjs";
 
 function git(repo, args) {
@@ -152,6 +154,51 @@ test("Codex child environment is an allowlist with no provider or secret variabl
     LANG: "en_US.UTF-8",
     PATH: "/safe/bin",
   });
+});
+
+test("process-group timeouts fail closed on Windows", () => {
+  assert.throws(
+    () => requirePosixProcessGroups("win32"),
+    /requires a POSIX platform/,
+  );
+  assert.doesNotThrow(() => requirePosixProcessGroups("darwin"));
+  assert.doesNotThrow(() => requirePosixProcessGroups("linux"));
+});
+
+test("Codex timeout kills the child process group before a descendant side effect", {
+  skip: process.platform === "win32" ? "POSIX process groups are required" : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-codex-timeout-"));
+  const marker = join(root, "descendant-survived.txt");
+  const descendantProgram = [
+    "const { writeFileSync } = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 500);`,
+  ].join("");
+  const parentProgram = [
+    "const { spawn } = require('node:child_process');",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantProgram)}], { stdio: 'ignore' });`,
+    "child.unref();",
+    "process.on('SIGTERM', () => process.exit(0));",
+    "setInterval(() => {}, 1000);",
+  ].join("");
+
+  try {
+    const result = await spawnCodexChild({
+      executable: process.execPath,
+      args: ["-e", parentProgram],
+      prompt: "",
+      timeoutMs: 100,
+      killGraceMilliseconds: 50,
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 550));
+
+    await assert.rejects(access(marker), { code: "ENOENT" });
+    assert.equal(result.timedOut, true);
+    assert.equal(result.status, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("material roots fail closed inside Git checkouts and platform temp storage", async () => {

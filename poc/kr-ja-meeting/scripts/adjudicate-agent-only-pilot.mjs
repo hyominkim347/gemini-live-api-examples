@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { adjudicateAgentOnlyGate } from "../src/agent-only-pilot-gate.mjs";
+import { requireApprovedPilotOutput } from "./pilot-local-safety.mjs";
 
 const benchmarkPath = fileURLToPath(
   new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
@@ -26,17 +27,13 @@ function parseOptions(args) {
   return options;
 }
 
-function requireLocalArtifactPath(path) {
-  const absolute = resolve(path);
-  if (!isAbsolute(absolute) || !absolute.split(sep).includes(".ua-pilot")) {
-    throw new Error("--output must be inside an ignored .ua-pilot directory");
-  }
-  return absolute;
-}
-
 export async function runAgentOnlyAdjudicator(args) {
   const options = parseOptions(args);
-  const outputPath = requireLocalArtifactPath(options.output);
+  const outputPath = await requireApprovedPilotOutput(
+    options.output,
+    "Agent-only adjudication output",
+    { rejectSymlinkPath: true },
+  );
   const [benchmarkText, rawText] = await Promise.all([
     readFile(benchmarkPath, "utf8"),
     readFile(resolve(options.raw), "utf8"),

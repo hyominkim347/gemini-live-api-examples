@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFile,
@@ -11,7 +11,7 @@ import {
   stat,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 export const CODEX_MATERIAL_PROFILE = "ua_pilot_material_only";
 
@@ -63,6 +63,26 @@ async function canonicalPath(path) {
   const existing = await nearestExistingPath(absolute);
   const canonicalExisting = await realpath(existing);
   return resolve(canonicalExisting, relative(existing, absolute));
+}
+
+async function pilotPathContainsSymlink(path) {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  const segments = relative(root, absolute).split(sep).filter(Boolean);
+  let current = root;
+  let insidePilotStorage = false;
+  for (const segment of segments) {
+    current = resolve(current, segment);
+    if (segment === ".ua-pilot") insidePilotStorage = true;
+    if (!insidePilotStorage) continue;
+    try {
+      if ((await lstat(current)).isSymbolicLink()) return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  return false;
 }
 
 async function regularFile(path, label) {
@@ -158,8 +178,12 @@ function requireGitText(path, args, label) {
 
 async function containingGitCheckout(path) {
   const existing = await nearestExistingPath(path);
+  const existingStat = await lstat(existing);
+  const searchFrom = existingStat.isDirectory() && !existingStat.isSymbolicLink()
+    ? existing
+    : dirname(existing);
   const result = gitResult(
-    existing,
+    searchFrom,
     ["rev-parse", "--show-toplevel"],
     new Set([0, 128]),
   );
@@ -170,9 +194,16 @@ function tomlString(value) {
   return JSON.stringify(String(value));
 }
 
-export async function requireApprovedPilotOutput(path, label = "Pilot output") {
+export async function requireApprovedPilotOutput(
+  path,
+  label = "Pilot output",
+  { rejectSymlinkPath = false } = {},
+) {
   const requested = resolve(path);
   const output = await canonicalPath(requested);
+  if (rejectSymlinkPath && await pilotPathContainsSymlink(requested)) {
+    throw new Error(`${label} must not use a symlinked parent`);
+  }
   if (!requested.split(sep).includes(".ua-pilot") || !output.split(sep).includes(".ua-pilot")) {
     throw new Error(`${label} must be stored below an exact .ua-pilot directory`);
   }
@@ -242,12 +273,169 @@ export function buildCodexChildEnv(source = process.env) {
   return environment;
 }
 
-export function spawnCodexChild({ executable, args, prompt, timeoutMs }) {
-  return spawnSync(executable, args, {
+function signalProcessGroup(child, signal) {
+  if (child.pid && process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+      return;
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+}
+
+export function requirePosixProcessGroups(platform = process.platform) {
+  if (platform === "win32") {
+    throw new Error("process-group timeout execution requires a POSIX platform");
+  }
+}
+
+export function runProcessGroupWithTimeout({
+  executable,
+  args = [],
+  cwd = process.cwd(),
+  env = process.env,
+  input,
+  timeoutMs,
+  killGraceMilliseconds = 250,
+  output = "capture",
+  maxBuffer = 32 * 1024 * 1024,
+}) {
+  if (typeof executable !== "string" || !executable) {
+    throw new TypeError("executable must be a non-empty string");
+  }
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) {
+    throw new TypeError("args must be a string array");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError("timeoutMs must be a positive finite number");
+  }
+  if (!Number.isFinite(killGraceMilliseconds) || killGraceMilliseconds < 0) {
+    throw new TypeError("killGraceMilliseconds must be a non-negative finite number");
+  }
+  if (!new Set(["capture", "inherit"]).has(output)) {
+    throw new TypeError("output must be capture or inherit");
+  }
+  if (!Number.isFinite(maxBuffer) || maxBuffer <= 0) {
+    throw new TypeError("maxBuffer must be a positive finite number");
+  }
+  requirePosixProcessGroups();
+
+  const child = spawn(executable, args, {
+    cwd,
+    env,
+    detached: true,
+    stdio: [
+      input === undefined ? "inherit" : "pipe",
+      output === "inherit" ? "inherit" : "pipe",
+      output === "inherit" ? "inherit" : "pipe",
+    ],
+  });
+
+  return new Promise((resolveResult) => {
+    const stdout = [];
+    const stderr = [];
+    let capturedBytes = 0;
+    let closeResult;
+    let processError = null;
+    let timedOut = false;
+    let terminationStarted = false;
+    let forceKillComplete = false;
+    let settled = false;
+    let forceKillTimer;
+
+    const result = () => ({
+      status: closeResult?.status ?? null,
+      signal: closeResult?.signal ?? null,
+      stdout: output === "capture" ? Buffer.concat(stdout).toString("utf8") : null,
+      stderr: output === "capture" ? Buffer.concat(stderr).toString("utf8") : null,
+      error: processError,
+      timedOut,
+    });
+    const finishIfReady = () => {
+      if (settled || (!closeResult && !processError)) return;
+      if (terminationStarted && !forceKillComplete) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(forceKillTimer);
+      resolveResult(result());
+    };
+    const beginTermination = () => {
+      if (terminationStarted) return;
+      terminationStarted = true;
+      try {
+        signalProcessGroup(child, "SIGTERM");
+      } catch (error) {
+        processError ??= error;
+      }
+      forceKillTimer = setTimeout(() => {
+        try {
+          signalProcessGroup(child, "SIGKILL");
+        } catch (error) {
+          processError ??= error;
+        }
+        forceKillComplete = true;
+        finishIfReady();
+      }, killGraceMilliseconds);
+    };
+    const capture = (target) => (chunk) => {
+      const bytes = Buffer.from(chunk);
+      capturedBytes += bytes.length;
+      if (capturedBytes <= maxBuffer) target.push(bytes);
+      if (capturedBytes > maxBuffer && !processError) {
+        processError = Object.assign(new Error("child output exceeded maxBuffer"), {
+          code: "ENOBUFS",
+        });
+        beginTermination();
+      }
+    };
+
+    if (output === "capture") {
+      child.stdout.on("data", capture(stdout));
+      child.stderr.on("data", capture(stderr));
+    }
+    child.once("error", (error) => {
+      processError = error;
+      if (!child.pid) forceKillComplete = true;
+      finishIfReady();
+    });
+    child.once("close", (status, signal) => {
+      closeResult = { status, signal };
+      finishIfReady();
+    });
+
+    if (input !== undefined) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      beginTermination();
+    }, timeoutMs);
+  });
+}
+
+export function spawnCodexChild({
+  executable,
+  args,
+  prompt,
+  timeoutMs,
+  killGraceMilliseconds = 250,
+}) {
+  return runProcessGroupWithTimeout({
+    executable,
+    args,
     input: prompt,
     env: buildCodexChildEnv(),
-    encoding: "utf8",
-    timeout: timeoutMs,
+    timeoutMs,
+    killGraceMilliseconds,
+    output: "capture",
     maxBuffer: 32 * 1024 * 1024,
   });
 }
