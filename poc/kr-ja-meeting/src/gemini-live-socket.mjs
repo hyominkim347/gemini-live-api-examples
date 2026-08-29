@@ -20,6 +20,9 @@ export class GeminiLiveTranslateSocket {
   #onClose;
   #onServerEvent;
   #automaticActivityDetection;
+  #eventRecorder;
+  #participantId;
+  #utteranceId;
   #socket = null;
   #setupComplete = false;
   #resumptionRetryUsed = false;
@@ -41,6 +44,9 @@ export class GeminiLiveTranslateSocket {
     onClose,
     onServerEvent,
     automaticActivityDetection = true,
+    eventRecorder = { record() {} },
+    participantId,
+    utteranceId,
   }) {
     if (!apiKey || !meetingId || !handleStore || !socketFactory) {
       throw new Error("apiKey, meetingId, handleStore, and socketFactory are required");
@@ -60,6 +66,12 @@ export class GeminiLiveTranslateSocket {
     this.#onClose = onClose ?? (() => {});
     this.#onServerEvent = onServerEvent ?? (() => {});
     this.#automaticActivityDetection = automaticActivityDetection;
+    if (!eventRecorder || typeof eventRecorder.record !== "function") {
+      throw new Error("eventRecorder.record must be a function");
+    }
+    this.#eventRecorder = eventRecorder;
+    this.#participantId = participantId;
+    this.#utteranceId = utteranceId;
   }
 
   connect() {
@@ -262,6 +274,18 @@ export class GeminiLiveTranslateSocket {
         outcome,
         meetingId: this.#meetingId,
         targetLanguage: this.#targetLanguage,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch {
+      // Diagnostics must not control session recovery.
+    }
+    try {
+      this.#eventRecorder.record({
+        type: `gemini-retry-${outcome}`,
+        participantId: this.#participantId,
+        utteranceId: this.#utteranceId,
+        language: this.#targetLanguage,
+        result: outcome,
         ...(errorCode ? { errorCode } : {}),
       });
     } catch {

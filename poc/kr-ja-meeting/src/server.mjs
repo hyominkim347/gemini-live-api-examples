@@ -9,6 +9,7 @@ import { GeminiLiveTranslateSocket } from "./gemini-live-socket.mjs";
 import { MemoryResumptionHandleStore } from "./gemini-session.mjs";
 import { LiveTranslationBridge } from "./live-translation-bridge.mjs";
 import { LiveKitAudioGateway } from "./livekit-audio-gateway.mjs";
+import { MeetingEventRecorder } from "./meeting-event-recorder.mjs";
 import { createMeetingHttpServer } from "./meeting-http.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -19,6 +20,12 @@ const livekitApiKey = process.env.LIVEKIT_API_KEY ?? "devkey";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const roomName = process.env.MEETING_ROOM ?? "kr-ja-browser-poc";
+const eventRecorder = new MeetingEventRecorder({
+  meetingId: roomName,
+  write(event) {
+    console.info(JSON.stringify({ source: "meeting-timeline", ...event }));
+  },
+});
 
 if (!geminiApiKey) {
   throw new Error("GEMINI_API_KEY is required to start the live browser meeting");
@@ -30,7 +37,7 @@ await translatorRoom.connect(
   await tokenFor("translator", "통역 중계", true),
   { autoSubscribe: false, dynacast: false },
 );
-const audioGateway = new LiveKitAudioGateway(translatorRoom);
+const audioGateway = new LiveKitAudioGateway(translatorRoom, { eventRecorder });
 await audioGateway.initialize();
 const handles = new MemoryResumptionHandleStore();
 const translationBridge = new LiveTranslationBridge({
@@ -46,12 +53,14 @@ const translationBridge = new LiveTranslationBridge({
       automaticActivityDetection: false,
     });
   },
+  eventRecorder,
 });
 const service = new BrowserMeetingService({
   roomName,
   livekitUrl,
   tokenIssuer: (participant) => tokenFor(participant.id, participant.name, true),
   translationBridge,
+  eventRecorder,
 });
 const vendorFiles = new Map([
   [

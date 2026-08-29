@@ -110,3 +110,36 @@ test("a listening plan event hook cannot interrupt audio plan application", () =
   assert.equal(playout.attach(translation, { trackName: translation.trackId }), true);
   assert.equal(translation.element.volume, 1);
 });
+
+test("track attachment and detachment expose a browser playout lifecycle hook", () => {
+  const { container, makeTrack } = fixture();
+  const events = [];
+  const playout = new BrowserAudioPlayout(container, {
+    onPlayoutEvent(event) { events.push(event); },
+  });
+  const translation = makeTrack("translation:ko");
+  playout.setPlan({
+    mode: "translation-only",
+    tracks: [{ trackId: translation.trackId, gain: 1 }],
+  });
+
+  playout.attach(translation, { trackName: translation.trackId });
+  playout.detach(translation);
+
+  assert.deepEqual(events, [
+    {
+      type: "playout-started",
+      trackId: "translation:ko",
+      listeningMode: "translation-only",
+      gain: 1,
+      result: "started",
+    },
+    {
+      type: "playout-completed",
+      trackId: "translation:ko",
+      listeningMode: "translation-only",
+      gain: 1,
+      result: "detached",
+    },
+  ]);
+});

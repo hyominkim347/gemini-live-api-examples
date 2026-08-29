@@ -15,10 +15,18 @@ export class LiveKitAudioGateway {
   #translationSinks = new Map();
   #localTracks = [];
   #closed = false;
+  #eventRecorder;
+  #disconnected;
 
-  constructor(room) {
+  constructor(room, { eventRecorder = { record() {} } } = {}) {
     if (!room) throw new Error("connected translator room is required");
+    if (!eventRecorder || typeof eventRecorder.record !== "function") {
+      throw new Error("eventRecorder.record must be a function");
+    }
     this.#room = room;
+    this.#eventRecorder = eventRecorder;
+    this.#disconnected = () => void this.close("disconnected");
+    this.#room.on?.(RoomEvent.Disconnected, this.#disconnected);
   }
 
   async initialize() {
@@ -37,9 +45,19 @@ export class LiveKitAudioGateway {
     const track = LocalAudioTrack.createAudioTrack(`translation:${targetLanguage}`, source);
     const options = new TrackPublishOptions();
     options.source = TrackSource.SOURCE_MICROPHONE;
+    const eventContext = {
+      language: targetLanguage,
+      trackId: `translation:${targetLanguage}`,
+      trackKind: "translation",
+    };
+    this.#record("livekit-publish-started", eventContext, { result: "started" });
     try {
       await this.#room.localParticipant.publishTrack(track, options);
     } catch (error) {
+      this.#record("livekit-publish-failed", eventContext, {
+        result: "failed",
+        errorCode: "translation-publish-failed",
+      });
       await track.close(true);
       throw error;
     }
@@ -47,6 +65,7 @@ export class LiveKitAudioGateway {
       await track.close(true);
       throw new Error("LiveKit audio gateway closed while publishing translation track");
     }
+    this.#record("livekit-publish-succeeded", eventContext, { result: "succeeded" });
     this.#localTracks.push(track);
     const sink = {
       async capture(pcm) {
@@ -110,11 +129,22 @@ export class LiveKitAudioGateway {
     };
   }
 
-  async close() {
+  async close(result = "closed") {
+    if (this.#closed) return;
     this.#closed = true;
+    this.#room.off?.(RoomEvent.Disconnected, this.#disconnected);
     await Promise.allSettled(this.#localTracks.map((track) => track.close(true)));
     this.#localTracks = [];
     this.#translationSinks.clear();
+    this.#record("resources-closed", {}, { result });
+  }
+
+  #record(type, context, fields) {
+    try {
+      this.#eventRecorder.record({ type, ...context, ...fields });
+    } catch {
+      // Observability hooks cannot change LiveKit delivery.
+    }
   }
 }
 
