@@ -7,6 +7,7 @@ test("first speaker keeps focus through a short overlap and hands off after endi
   let now = 0;
   const policy = new TranslationFocusPolicy({
     clock: () => now,
+    minimumFocusHoldMilliseconds: 500,
     overlapWarningMilliseconds: 1_000,
   });
 
@@ -33,6 +34,45 @@ test("first speaker keeps focus through a short overlap and hands off after endi
   policy.speechEnded("ja-1");
   assert.equal(policy.snapshot().translationFocusId, "ko-1");
   assert.deepEqual(policy.snapshot().speakingParticipantIds, ["ko-1"]);
+});
+
+test("an overlap candidate must outlast the minimum hold before receiving vacated focus", () => {
+  let now = 0;
+  const policy = new TranslationFocusPolicy({
+    clock: () => now,
+    minimumFocusHoldMilliseconds: 500,
+  });
+
+  policy.speechStarted("main-speaker");
+  now = 100;
+  policy.speechStarted("acknowledgment");
+  now = 200;
+  assert.equal(policy.speechEnded("main-speaker").translationFocusId, null);
+
+  now = 599;
+  assert.equal(policy.advance().translationFocusId, null);
+  now = 600;
+  assert.equal(policy.advance().translationFocusId, "acknowledgment");
+});
+
+test("a short acknowledgment that ends before the minimum hold never receives focus", () => {
+  let now = 0;
+  const policy = new TranslationFocusPolicy({
+    clock: () => now,
+    minimumFocusHoldMilliseconds: 500,
+  });
+
+  policy.speechStarted("main-speaker");
+  now = 100;
+  policy.speechStarted("acknowledgment");
+  now = 200;
+  policy.speechEnded("main-speaker");
+  now = 300;
+  policy.speechEnded("acknowledgment");
+  now = 600;
+
+  assert.equal(policy.advance().translationFocusId, null);
+  assert.deepEqual(policy.snapshot().speakingParticipantIds, []);
 });
 
 test("long overlap becomes a warning without removing either speaker", () => {

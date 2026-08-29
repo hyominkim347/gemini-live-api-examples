@@ -1,7 +1,9 @@
+const DEFAULT_MINIMUM_FOCUS_HOLD_MILLISECONDS = 750;
 const DEFAULT_OVERLAP_WARNING_MILLISECONDS = 1_500;
 
 export class TranslationFocusPolicy {
   #clock;
+  #minimumFocusHoldMilliseconds;
   #overlapWarningMilliseconds;
   #speaking = new Map();
   #translationFocusId = null;
@@ -12,11 +14,14 @@ export class TranslationFocusPolicy {
 
   constructor({
     clock = () => Date.now(),
+    minimumFocusHoldMilliseconds = DEFAULT_MINIMUM_FOCUS_HOLD_MILLISECONDS,
     overlapWarningMilliseconds = DEFAULT_OVERLAP_WARNING_MILLISECONDS,
   } = {}) {
     if (typeof clock !== "function") throw new Error("translation focus clock is required");
+    validateDuration(minimumFocusHoldMilliseconds, "minimum focus hold");
     validateDuration(overlapWarningMilliseconds, "overlap warning");
     this.#clock = clock;
+    this.#minimumFocusHoldMilliseconds = minimumFocusHoldMilliseconds;
     this.#overlapWarningMilliseconds = overlapWarningMilliseconds;
   }
 
@@ -24,12 +29,15 @@ export class TranslationFocusPolicy {
     validateParticipantId(participantId);
     validateTimestamp(observedAt);
     if (this.#speaking.has(participantId)) return this.snapshot(observedAt);
+    const wasIdle = this.#speaking.size === 0;
     this.#speaking.set(participantId, observedAt);
     if (this.#speaking.size === 2) {
       this.#overlapStartedAt = observedAt;
       this.#overlapDetectedAt = null;
     }
-    if (!this.#translationFocusId) this.#selectFocus(participantId, observedAt);
+    if (!this.#translationFocusId) {
+      if (wasIdle) this.#selectFocus(participantId, observedAt);
+    }
     return this.snapshot(observedAt);
   }
 
@@ -41,12 +49,18 @@ export class TranslationFocusPolicy {
       this.#overlapStartedAt = null;
       this.#overlapDetectedAt = null;
     }
-    if (this.#translationFocusId === participantId) {
-      const nextParticipantId = this.#speaking.keys().next().value ?? null;
+    const focusEnded = this.#translationFocusId === participantId;
+    if (focusEnded) {
       this.#translationFocusId = null;
       this.#focusSelectedAt = null;
-      if (nextParticipantId) this.#selectFocus(nextParticipantId, observedAt);
     }
+    if (focusEnded) this.#selectEligibleFocus(observedAt);
+    return this.snapshot(observedAt);
+  }
+
+  advance(observedAt = this.#clock()) {
+    validateTimestamp(observedAt);
+    if (!this.#translationFocusId) this.#selectEligibleFocus(observedAt);
     return this.snapshot(observedAt);
   }
 
@@ -98,6 +112,14 @@ export class TranslationFocusPolicy {
   #selectFocus(participantId, observedAt) {
     this.#translationFocusId = participantId;
     this.#focusSelectedAt = observedAt;
+  }
+
+  #selectEligibleFocus(observedAt) {
+    for (const [participantId, speechStartedAt] of this.#speaking) {
+      if (observedAt - speechStartedAt < this.#minimumFocusHoldMilliseconds) continue;
+      this.#selectFocus(participantId, observedAt);
+      return;
+    }
   }
 }
 

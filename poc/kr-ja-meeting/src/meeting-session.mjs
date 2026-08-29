@@ -143,13 +143,18 @@ export class MeetingSession {
 
   audioPlanFor(listenerId) {
     const listener = this.#requireParticipant(listenerId);
+    const speakers = [...this.#participantById.values()]
+      .filter(({ speech }) => speech === "speaking");
     if (!this.#translationFocusId) {
-      return { mode: "silent", tracks: [] };
+      if (speakers.length === 0) return { mode: "silent", tracks: [] };
+      return this.#listeningMixController.planWithoutFocus({
+        listener,
+        speakers,
+        mode: this.listeningModeFor(listenerId),
+      });
     }
 
     const focusSpeaker = this.#activeSpeaker();
-    const speakers = [...this.#participantById.values()]
-      .filter(({ speech }) => speech === "speaking");
     return this.#listeningMixController.planFor({
       listener,
       speakers,

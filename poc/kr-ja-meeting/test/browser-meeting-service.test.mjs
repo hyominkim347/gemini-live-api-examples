@@ -126,6 +126,45 @@ test("browser-relative speech timestamps cannot trigger a server-clock overlap w
   assert.equal(service.snapshot().overlap.detected, true);
 });
 
+test("vacated focus waits for a continuing overlap candidate to satisfy minimum hold", async () => {
+  let now = 0;
+  let participantSequence = 0;
+  let utteranceSequence = 0;
+  const { service, bridgeEvents } = createService({
+    clock: () => now,
+    minimumFocusHoldMilliseconds: 500,
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    utteranceIdFactory: () => `utterance-${++utteranceSequence}`,
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 0 });
+  now = 100;
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 100 });
+  now = 200;
+  const waiting = await service.speechActivity({ participantId: first.id, type: "speech-end", observedAt: 200 });
+
+  assert.equal(waiting.translationFocusId, null);
+  assert.equal(waiting.speakingParticipantIds.includes(second.id), true);
+  assert.deepEqual(bridgeEvents.map(({ type, participantId }) => ({ type, participantId })), [
+    { type: "start", participantId: first.id },
+    { type: "stop", participantId: undefined },
+  ]);
+
+  now = 599;
+  assert.equal((await service.refresh()).translationFocusId, null);
+  now = 600;
+  assert.equal((await service.refresh()).translationFocusId, second.id);
+  assert.deepEqual(bridgeEvents.at(-1), {
+    type: "start",
+    participantId: second.id,
+    utteranceId: "utterance-2",
+    observedAt: 600,
+  });
+});
+
 test("dynamic participant joins with a generated id and can leave", async () => {
   const { service } = createService();
 

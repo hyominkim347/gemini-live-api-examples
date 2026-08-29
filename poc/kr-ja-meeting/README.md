@@ -7,6 +7,7 @@ Google의 [Live Translate LiveKit 예제](https://github.com/google-gemini/gemin
 - 참가 경험: 이름과 언어로 입장하고 일반 회의처럼 마이크만 켜고 끔
 - 발화 경험: 마이크가 켜진 무음 상태를 유지할 수 있고, VAD가 발화 시작과 끝을 자동 전달
 - 현재 통역 규칙: 겹침 발화를 막지 않고 하나의 통역 초점을 유지한 뒤 안전하게 넘김
+- 초점 유지 규칙: 첫 화자는 즉시 선택하고, 겹침 후보는 설정된 최소 시간 동안 계속 말한 경우에만 종료된 화자의 다음 초점이 됨
 - 데이터 경계: resumption handle은 메모리에만 두고 회의 종료 시 폐기
 - 미사용: File API, explicit cache, Grounding, 입력·출력 전사, 애플리케이션 음성 로그
 

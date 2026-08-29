@@ -366,12 +366,16 @@ test("Gemini input and output are correlated without claiming browser playout", 
 
 test("browser playout failure reaches the privacy-safe meeting timeline", async () => {
   const { service, events, setNow } = timelineService();
+  const speaker = (await service.join({ name: "Yuki", language: "ja" })).participant;
   const listener = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(speaker.id, true);
+  await service.speechActivity({ participantId: speaker.id, type: "speech-start", observedAt: 0 });
   setNow(50);
 
   await service.playout(listener.id, {
     type: "playout-aborted",
     trackId: "translation:ko",
+    utteranceId: "utterance-1",
     listeningMode: "translation-focused",
     gain: 1,
     result: "failed",
@@ -383,6 +387,7 @@ test("browser playout failure reaches the privacy-safe meeting timeline", async 
     type: "playout-aborted",
     meetingId: "meeting-1",
     participantId: listener.id,
+    utteranceId: "utterance-1",
     language: "ko",
     targetLanguage: "ko",
     listeningMode: "translation-focused",
@@ -394,4 +399,48 @@ test("browser playout failure reaches the privacy-safe meeting timeline", async 
     timestamp: 50,
   });
   assert.equal(JSON.stringify(events).includes("private"), false);
+});
+
+test("browser playout ids are validated against the authoritative listening plan", async () => {
+  const { service, events, setNow } = timelineService();
+  const speaker = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const listener = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(speaker.id, true);
+  await service.speechActivity({ participantId: speaker.id, type: "speech-start", observedAt: 0 });
+  setNow(80);
+
+  await assert.rejects(service.playout(listener.id, {
+    type: "playout-started",
+    trackId: "translation:ko",
+    utteranceId: "client-invented",
+    listeningMode: "translation-focused",
+    gain: 1,
+    result: "started",
+  }), /utteranceId does not match/);
+
+  await service.playout(listener.id, {
+    type: "playout-gap",
+    trackId: "translation:ko",
+    utteranceId: "utterance-1",
+    listeningMode: "translation-focused",
+    gain: 1,
+    result: "interrupted",
+    errorCode: "browser-playout-gap",
+  });
+
+  assert.deepEqual(events.at(-1), {
+    type: "playout-gap",
+    meetingId: "meeting-1",
+    participantId: listener.id,
+    utteranceId: "utterance-1",
+    language: "ko",
+    targetLanguage: "ko",
+    listeningMode: "translation-focused",
+    trackId: "translation:ko",
+    trackKind: "translation",
+    gain: 1,
+    result: "interrupted",
+    errorCode: "browser-playout-gap",
+    timestamp: 80,
+  });
 });

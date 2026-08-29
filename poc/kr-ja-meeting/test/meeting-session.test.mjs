@@ -61,6 +61,7 @@ test("one automatic speaker produces relation-based listener audio plans", () =>
         kind: "original",
         role: "foreground",
         gain: 1,
+        utteranceId: "utterance-1",
       },
     ],
   });
@@ -80,10 +81,34 @@ test("overlap keeps every same-language original in the foreground beside one tr
   assert.deepEqual(session.audioPlanFor("ko-listener"), {
     mode: "translation-focused",
     tracks: [
-      { trackId: "original:ja-focus", kind: "original", role: "background", gain: 0.2 },
-      { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
-      { trackId: "original:ko-overlap", kind: "original", role: "foreground", gain: 1 },
+      { trackId: "original:ja-focus", kind: "original", role: "background", gain: 0.2, utteranceId: "utterance-1" },
+      { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1, utteranceId: "utterance-1" },
+      { trackId: "original:ko-overlap", kind: "original", role: "foreground", gain: 1, utteranceId: "utterance-2" },
     ],
+  });
+});
+
+test("vacated translation focus keeps speaking originals audible while focus is pending", () => {
+  const session = new MeetingSession([
+    { id: "ja-focus", name: "Yuki", language: "ja" },
+    { id: "ko-candidate", name: "민준", language: "ko" },
+    { id: "ko-listener", name: "서연", language: "ko" },
+  ]);
+  session.setMicrophone("ja-focus", true);
+  session.setMicrophone("ko-candidate", true);
+  session.startSpeech("ja-focus", "utterance-1");
+  session.startSpeech("ko-candidate", "utterance-2");
+  session.endSpeech("ja-focus");
+
+  assert.deepEqual(session.audioPlanFor("ko-listener"), {
+    mode: "focus-pending",
+    tracks: [{
+      trackId: "original:ko-candidate",
+      kind: "original",
+      role: "foreground",
+      gain: 1,
+      utteranceId: "utterance-2",
+    }],
   });
 });
 
@@ -112,7 +137,7 @@ test("each listener keeps an independent persistent listening mode", () => {
 
   assert.equal(session.audioPlanFor("ko-one").mode, "translation-only");
   assert.deepEqual(session.audioPlanFor("ko-one").tracks, [
-    { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1 },
+    { trackId: "translation:ko", kind: "translation", role: "foreground", gain: 1, utteranceId: "utterance-1" },
   ]);
   assert.equal(session.audioPlanFor("ko-two").mode, "translation-focused");
   assert.equal(session.snapshot().participants.find(({ id }) => id === "ko-one").listeningMode, "translation-only");
@@ -132,7 +157,7 @@ test("original-check restores the listener's previous mode at its automatic utte
   assert.deepEqual(session.audioPlanFor("ko-listener"), {
     mode: "original-check",
     tracks: [
-      { trackId: "original:ja-speaker", kind: "original", role: "foreground", gain: 1 },
+      { trackId: "original:ja-speaker", kind: "original", role: "foreground", gain: 1, utteranceId: "utterance-1" },
     ],
   });
 
