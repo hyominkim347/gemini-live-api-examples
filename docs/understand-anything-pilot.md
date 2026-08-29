@@ -2,7 +2,7 @@
 
 ## Goal
 
-Evaluate whether Understand-Anything helps a developer and a Codex agent answer code-change impact questions more accurately and quickly than repository search alone.
+Evaluate whether Understand-Anything helps a Codex agent answer code-change impact questions more accurately and quickly than repository search alone.
 
 ## Analysis Boundary
 
@@ -24,28 +24,28 @@ Every Evidence Answer must name the affected behavior, exact file or symbol, and
 
 ## Comparison
 
-Run both comparisons against the same Analysis Snapshot, Codex model, time limit, and question set. Use fresh context and cross the execution order.
+Run the Agent Lane comparison against the same Analysis Snapshot, Codex model, time limit, and question set. Use fresh context and cross the execution order.
 
-- Developer Lane: Understand-Anything dashboard versus `rg`
 - Agent Lane: Understand-Anything graph versus `rg`
 
-## Pilot Pass Gate
+The Developer Lane is an optional later validation for an actual project developer. Codex does not proxy it, and this Agent-only pilot makes no developer-utility or dashboard-usability claim.
 
-Both lanes must independently achieve:
+## Agent Context Pass Gate
+
+The Agent Lane must achieve all four conditions:
 
 - at least 10 correct answers out of 12
 - evidence links for all 12 answers
 - zero invented files or relationships
 - at least 25% lower median answer time
 
-Missing the gate in either lane activates the Stop Rule. Do not relax thresholds or tune answers after observing results.
+Missing any condition activates the Stop Rule. Do not relax thresholds, expected answers, evidence criteria, or raw results after observing results.
 
 ## Operating Policy
 
 - One full analysis may take at most 30 minutes.
 - An Incremental Refresh may take at most 5 minutes.
-- Codex prepares the analysis and runs the Agent Lane.
-- One project developer independently runs the Developer Lane.
+- Codex prepares the analysis, runs the Agent Lane, and applies the frozen gate.
 - Pilot Artifacts remain local with no commit, CI, schedule, or background automation.
 - Keep artifacts and timing records until the pilot result is accepted. Cleanup requires a separate explicit decision.
 
@@ -97,6 +97,27 @@ node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs verify-artifact \
   --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
 ```
 
-## Result Routing
+## Agent-only Adjudication
 
-Passing both lanes makes Understand-Anything an Adoption Candidate only. Rollout, implementation, issue publication, commit, PR, and deployment require a separate next-flow decision. Failing either lane ends adoption work for this approach.
+The adjudicator pins the frozen `impact-benchmark-v1` bytes at SHA-256
+`753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6`
+and the AIN-7643 raw result bytes at SHA-256
+`6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0`.
+It counts an answer as correct only when grounded raw evidence contains every
+frozen expected code and test item. `unsupported`, `unknown`, unverified, or
+invented evidence never counts in favor of the graph arm.
+The scorer revision is `agent-only-gate-v1`; its output records that revision,
+the input/output contract revisions, and each question's matched and missing
+frozen code and test evidence.
+
+```bash
+npm run pilot:adjudicate-agent -- \
+  --raw /absolute/path/to/raw-results.json \
+  --output /absolute/path/to/repository/.ua-pilot/agent-only-gate/adjudication.json
+```
+
+The ignored local result records exactly one routing value: `Agent Context Candidate`
+when all four conditions pass, otherwise `Stop Rule`. It also retains the frozen
+input digests, per-question evidence comparison, and timing metrics needed to
+reproduce the decision. Neither value is a developer-utility, dashboard-usability,
+permanent-adoption, rollout, or production-readiness claim.
