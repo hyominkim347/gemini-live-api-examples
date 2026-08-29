@@ -196,3 +196,52 @@ test("segment trace store cannot be used to bypass the recorder allowlist", () =
     providerPayload: { transcript: "private" },
   }), /unsupported meeting event field: providerPayload/);
 });
+
+test("segment trace caps records and coalesces consecutive queue telemetry", () => {
+  let now = 1_000;
+  const store = new MemoryMeetingSegmentTraceStore({
+    clock: () => now,
+    maxRecords: 3,
+  });
+  const write = (type, fields = {}) => {
+    store.write({
+      type,
+      meetingId: "meeting-1",
+      participantId: "participant-1",
+      utteranceId: "utterance-1",
+      timestamp: now,
+      result: "observed",
+      ...fields,
+    });
+    now += 1;
+  };
+
+  write("speech-started");
+  write("livekit-queue-updated", { queueDurationMs: 100 });
+  write("livekit-queue-updated", { queueDurationMs: 200 });
+  assert.deepEqual(
+    store.query({ role: "operator" }).map(({ type, queueDurationMs }) => ({
+      type,
+      ...(queueDurationMs === undefined ? {} : { queueDurationMs }),
+    })),
+    [
+      { type: "speech-started" },
+      { type: "livekit-queue-updated", queueDurationMs: 200 },
+    ],
+  );
+
+  write("gemini-output-received");
+  write("playout-started");
+
+  assert.deepEqual(
+    store.query({ role: "operator" }).map(({ type, queueDurationMs }) => ({
+      type,
+      ...(queueDurationMs === undefined ? {} : { queueDurationMs }),
+    })),
+    [
+      { type: "livekit-queue-updated", queueDurationMs: 200 },
+      { type: "gemini-output-received" },
+      { type: "playout-started" },
+    ],
+  );
+});

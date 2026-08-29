@@ -76,6 +76,7 @@ const STORED_FIELDS = new Set([
 const TRACE_READ_ROLES = new Set(["operator", "developer"]);
 
 export const SEGMENT_TRACE_RETENTION_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
+export const SEGMENT_TRACE_MAX_RECORDS = 10_000;
 
 export class MeetingEventRecorder {
   #meetingId;
@@ -123,6 +124,7 @@ export class MeetingEventRecorder {
 export class MemoryMeetingSegmentTraceStore {
   #clock;
   #retentionMilliseconds;
+  #maxRecords;
   #scheduleExpiry;
   #cancelExpiry;
   #expiryTimer = null;
@@ -131,6 +133,7 @@ export class MemoryMeetingSegmentTraceStore {
   constructor({
     clock = Date.now,
     retentionMilliseconds = SEGMENT_TRACE_RETENTION_MILLISECONDS,
+    maxRecords = SEGMENT_TRACE_MAX_RECORDS,
     scheduleExpiry = setTimeout,
     cancelExpiry = clearTimeout,
   } = {}) {
@@ -138,11 +141,15 @@ export class MemoryMeetingSegmentTraceStore {
     if (!Number.isFinite(retentionMilliseconds) || retentionMilliseconds <= 0) {
       throw new Error("trace retention must be a positive number");
     }
+    if (!Number.isSafeInteger(maxRecords) || maxRecords <= 0) {
+      throw new Error("trace maxRecords must be a positive integer");
+    }
     if (typeof scheduleExpiry !== "function" || typeof cancelExpiry !== "function") {
       throw new Error("trace expiry scheduler must provide schedule and cancel functions");
     }
     this.#clock = clock;
     this.#retentionMilliseconds = retentionMilliseconds;
+    this.#maxRecords = maxRecords;
     this.#scheduleExpiry = scheduleExpiry;
     this.#cancelExpiry = cancelExpiry;
   }
@@ -154,10 +161,19 @@ export class MemoryMeetingSegmentTraceStore {
     if (!Number.isFinite(event.timestamp)) throw new Error("event timestamp must be finite");
     const storedAt = this.#now();
     this.#purge(storedAt);
-    this.#records.push({
+    const record = {
       event: Object.freeze({ ...event, stage: traceStage(event.type) }),
       storedAt,
-    });
+    };
+    const previous = this.#records.at(-1);
+    if (canCoalesceQueueTelemetry(previous?.event, record.event)) {
+      this.#records[this.#records.length - 1] = record;
+    } else {
+      this.#records.push(record);
+      if (this.#records.length > this.#maxRecords) {
+        this.#records.splice(0, this.#records.length - this.#maxRecords);
+      }
+    }
     this.#armExpiry(storedAt);
   }
 
@@ -238,4 +254,12 @@ function traceStage(type) {
     return "meeting-lifecycle";
   }
   return "browser-input";
+}
+
+function canCoalesceQueueTelemetry(previous, next) {
+  if (previous?.type !== "livekit-queue-updated" || next?.type !== "livekit-queue-updated") {
+    return false;
+  }
+  return ["meetingId", "participantId", "utteranceId", "targetLanguage", "trackId"]
+    .every((field) => previous[field] === next[field]);
 }
