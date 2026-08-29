@@ -21,8 +21,7 @@ test("provider canary completes only after the real LiveKit and Gemini signals",
   evidence.record("translationTrackPublished", true);
   evidence.record("translationTrackSubscribed", true);
   evidence.record("listenerReceivedTranslatedAudio", true);
-  evidence.record("resumptionHandleReceived", true);
-  evidence.record("resumptionHandleReused", true);
+  evidence.record("freshSessionSetup", true);
   evidence.record("originalCheckExclusive", true);
   assert.equal(evidence.complete, false);
 

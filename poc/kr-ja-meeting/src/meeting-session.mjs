@@ -2,7 +2,7 @@ import { ListeningMixController } from "./listening-mix-controller.mjs";
 
 const SUPPORTED_LANGUAGES = new Set(["ko", "ja"]);
 const PERSISTENT_LISTENING_MODES = new Set(["translation-focused", "translation-only"]);
-const TRANSLATION_AVAILABILITIES = new Set(["available", "reconnecting"]);
+const TRANSLATION_AVAILABILITIES = new Set(["available", "reconnecting", "unavailable"]);
 
 export class MeetingSession {
   #participantById = new Map();
@@ -156,7 +156,7 @@ export class MeetingSession {
     const listener = this.#requireParticipant(listenerId);
     const speakers = [...this.#participantById.values()]
       .filter(({ speech }) => speech === "speaking");
-    if (this.#translationAvailability === "reconnecting" && speakers.length > 0) {
+    if (this.#translationAvailability !== "available" && speakers.length > 0) {
       return this.#listeningMixController.planOriginalFallback({ listener, speakers });
     }
     if (!this.#translationFocusId) {

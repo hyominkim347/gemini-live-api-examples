@@ -4,7 +4,6 @@ import test from "node:test";
 import { BrowserMeetingService } from "../src/browser-meeting-service.mjs";
 import { GeminiLiveTranslateSocket } from "../src/gemini-live-socket.mjs";
 import { MeetingEventRecorder } from "../src/meeting-event-recorder.mjs";
-import { MemoryResumptionHandleStore } from "../src/gemini-session.mjs";
 import { LiveTranslationBridge } from "../src/live-translation-bridge.mjs";
 
 class FakeSocket {
@@ -227,11 +226,9 @@ test("listener mode and applied gains are recorded without audio content", async
   );
 });
 
-test("a failed Gemini retry aborts the correlated utterance and closes resources", async () => {
+test("three failed fresh Gemini setups abort the correlated utterance and close resources", async () => {
   const sockets = [];
   const events = [];
-  const handles = new MemoryResumptionHandleStore();
-  handles.set("meeting-1", "ko", "private-expired-handle");
   const recorder = new MeetingEventRecorder({
     meetingId: "meeting-1",
     clock: () => 500,
@@ -248,7 +245,6 @@ test("a failed Gemini retry aborts the correlated utterance and closes resources
       return new GeminiLiveTranslateSocket({
         ...callbacks,
         apiKey: "private-api-key",
-        handleStore: handles,
         socketFactory() {
           const socket = new FakeSocket();
           sockets.push(socket);
@@ -278,22 +274,25 @@ test("a failed Gemini retry aborts the correlated utterance and closes resources
   });
   await waitFor(() => sockets.length === 1);
   sockets[0].emit("open");
-  sockets[0].emit("close", 1008, "BidiGenerateContent session not found: private-expired-handle");
+  sockets[0].emit("close", 1011, "provider setup failed");
   await waitFor(() => sockets.length === 2);
   sockets[1].emit("open");
-  sockets[1].emit("close", 1008, "BidiGenerateContent session not found: private-expired-handle");
+  sockets[1].emit("close", 1011, "provider setup failed");
+  await waitFor(() => sockets.length === 3);
+  sockets[2].emit("open");
+  sockets[2].emit("close", 1011, "provider setup failed");
 
   await assert.rejects(speech, /Gemini closed during setup/);
   assert.deepEqual(events.filter(({ type }) => [
     "gemini-setup-started",
-    "gemini-retry-started",
     "gemini-retry-failed",
     "gemini-setup-failed",
     "resources-closed",
     "utterance-aborted",
   ].includes(type)).map(({ type }) => type), [
     "gemini-setup-started",
-    "gemini-retry-started",
+    "gemini-retry-failed",
+    "gemini-retry-failed",
     "gemini-retry-failed",
     "gemini-setup-failed",
     "resources-closed",
@@ -303,7 +302,6 @@ test("a failed Gemini retry aborts the correlated utterance and closes resources
     .every(({ participantId, utteranceId }) =>
       participantId === speaker.id && utteranceId === "utterance-1"));
   const serialized = JSON.stringify(events);
-  assert.equal(serialized.includes("private-expired-handle"), false);
   assert.equal(serialized.includes("private-api-key"), false);
   assert.equal(serialized.includes("private-token"), false);
 });

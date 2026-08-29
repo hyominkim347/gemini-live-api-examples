@@ -8,14 +8,13 @@ export class GeminiLiveTranslateSocket {
   #apiKey;
   #meetingId;
   #targetLanguage;
-  #handleStore;
+  #glossary;
   #socketFactory;
   #openState;
   #onTranslatedAudio;
   #onSetupComplete;
   #onGenerationComplete;
   #onTurnComplete;
-  #onResumptionHandle;
   #onError;
   #onClose;
   #onServerEvent;
@@ -25,21 +24,18 @@ export class GeminiLiveTranslateSocket {
   #utteranceId;
   #socket = null;
   #setupComplete = false;
-  #resumptionRetryUsed = false;
-  #resumptionRetryPending = false;
 
   constructor({
     apiKey,
     meetingId,
     targetLanguage,
-    handleStore,
+    glossary = [],
     socketFactory,
     openState = 1,
     onTranslatedAudio,
     onSetupComplete,
     onGenerationComplete,
     onTurnComplete,
-    onResumptionHandle,
     onError,
     onClose,
     onServerEvent,
@@ -48,20 +44,19 @@ export class GeminiLiveTranslateSocket {
     participantId,
     utteranceId,
   }) {
-    if (!apiKey || !meetingId || !handleStore || !socketFactory) {
-      throw new Error("apiKey, meetingId, handleStore, and socketFactory are required");
+    if (!apiKey || !meetingId || !socketFactory) {
+      throw new Error("apiKey, meetingId, and socketFactory are required");
     }
     this.#apiKey = apiKey;
     this.#meetingId = meetingId;
     this.#targetLanguage = targetLanguage;
-    this.#handleStore = handleStore;
+    this.#glossary = glossary;
     this.#socketFactory = socketFactory;
     this.#openState = openState;
     this.#onTranslatedAudio = onTranslatedAudio ?? (() => {});
     this.#onSetupComplete = onSetupComplete ?? (() => {});
     this.#onGenerationComplete = onGenerationComplete ?? (() => {});
     this.#onTurnComplete = onTurnComplete ?? (() => {});
-    this.#onResumptionHandle = onResumptionHandle ?? (() => {});
     this.#onError = onError ?? (() => {});
     this.#onClose = onClose ?? (() => {});
     this.#onServerEvent = onServerEvent ?? (() => {});
@@ -78,8 +73,6 @@ export class GeminiLiveTranslateSocket {
     if (this.#socket) {
       throw new Error("Gemini socket is already connected");
     }
-    this.#resumptionRetryUsed = false;
-    this.#resumptionRetryPending = false;
     return this.#connectSocket();
   }
 
@@ -87,18 +80,13 @@ export class GeminiLiveTranslateSocket {
     const url = `${GEMINI_LIVE_URL}?key=${encodeURIComponent(this.#apiKey)}`;
     const socket = this.#socketFactory(url);
     this.#socket = socket;
-    let resumptionHandle = null;
     this.#listen(socket, "open", () => {
       if (this.#socket !== socket) return;
-      resumptionHandle = this.#handleStore.get(
-        this.#meetingId,
-        this.#targetLanguage,
-      );
       socket.send(
         JSON.stringify(
           buildGeminiSetup({
             targetLanguage: this.#targetLanguage,
-            resumptionHandle,
+            glossary: this.#glossary,
             automaticActivityDetection: this.#automaticActivityDetection,
           }),
         ),
@@ -112,32 +100,9 @@ export class GeminiLiveTranslateSocket {
     });
     this.#listen(socket, "close", (code, reason) => {
       if (this.#socket !== socket) return;
-      const setupComplete = this.#setupComplete;
       this.#socket = null;
       this.#setupComplete = false;
-      if (
-        !setupComplete &&
-        resumptionHandle &&
-        !this.#resumptionRetryUsed &&
-        isMissingResumptionSession(code, reason)
-      ) {
-        this.#resumptionRetryUsed = true;
-        this.#resumptionRetryPending = true;
-        this.#handleStore.delete(this.#meetingId, this.#targetLanguage);
-        this.#recordResumptionRetry("started");
-        this.#connectSocket();
-        return;
-      }
-      if (!setupComplete && this.#resumptionRetryPending) {
-        this.#resumptionRetryPending = false;
-        this.#recordResumptionRetry(
-          "failed",
-          isMissingResumptionSession(code, reason)
-            ? "session-not-found"
-            : "setup-closed",
-        );
-      }
-      this.#onClose();
+      this.#onClose(code, reason);
     });
     return socket;
   }
@@ -200,7 +165,6 @@ export class GeminiLiveTranslateSocket {
     const message = JSON.parse(payload);
     const serverEvent = {};
     if (message.setupComplete) serverEvent.setupComplete = true;
-    if (message.sessionResumptionUpdate) serverEvent.resumptionUpdate = true;
     if (message.serverContent?.modelTurn?.parts?.some((part) => part.inlineData?.data)) {
       serverEvent.modelAudio = true;
     }
@@ -213,21 +177,7 @@ export class GeminiLiveTranslateSocket {
     if (Object.keys(serverEvent).length > 0) this.#onServerEvent(serverEvent);
     if (message.setupComplete) {
       this.#setupComplete = true;
-      if (this.#resumptionRetryPending) {
-        this.#resumptionRetryPending = false;
-        this.#recordResumptionRetry("succeeded");
-      }
       this.#onSetupComplete();
-    }
-
-    const update = message.sessionResumptionUpdate;
-    if (update?.resumable && update.newHandle) {
-      this.#handleStore.set(
-        this.#meetingId,
-        this.#targetLanguage,
-        update.newHandle,
-      );
-      this.#onResumptionHandle();
     }
 
     for (const part of message.serverContent?.modelTurn?.parts ?? []) {
@@ -267,36 +217,4 @@ export class GeminiLiveTranslateSocket {
     return true;
   }
 
-  #recordResumptionRetry(outcome, errorCode) {
-    try {
-      this.#onServerEvent({
-        type: "resumption-retry",
-        outcome,
-        meetingId: this.#meetingId,
-        targetLanguage: this.#targetLanguage,
-        ...(errorCode ? { errorCode } : {}),
-      });
-    } catch {
-      // Diagnostics must not control session recovery.
-    }
-    try {
-      this.#eventRecorder.record({
-        type: `gemini-retry-${outcome}`,
-        participantId: this.#participantId,
-        utteranceId: this.#utteranceId,
-        targetLanguage: this.#targetLanguage,
-        result: outcome,
-        ...(errorCode ? { errorCode, reconnectReason: errorCode } : {}),
-      });
-    } catch {
-      // Diagnostics must not control session recovery.
-    }
-  }
-}
-
-function isMissingResumptionSession(code, reason) {
-  return (
-    code === 1008 &&
-    String(reason ?? "").includes("BidiGenerateContent session not found")
-  );
 }

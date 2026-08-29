@@ -9,5 +9,8 @@ test("reconnecting translation shows the original-audio fallback status", () => 
     message: "통역 재연결 중입니다. 잠시 원음을 정상 크기로 들려드립니다.",
   });
   assert.equal(translationStatusView("available"), null);
-  assert.throws(() => translationStatusView("unavailable"), /unsupported translation availability/);
+  assert.deepEqual(translationStatusView("unavailable"), {
+    healthLabel: "통역 복구 대기 중",
+    message: "통역을 복구하고 있습니다. 원음을 정상 크기로 계속 들려드립니다.",
+  });
 });

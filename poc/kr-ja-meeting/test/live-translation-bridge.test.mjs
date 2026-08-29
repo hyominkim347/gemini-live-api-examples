@@ -394,6 +394,73 @@ test("Gemini is closed when setup fails", async () => {
   assert.equal(closed, true);
 });
 
+test("provider replacement fences stale output, buffers only two seconds, and cools down after three retries", async () => {
+  const clients = [];
+  const sent = [];
+  const captured = [];
+  const availability = [];
+  const scheduled = [];
+  let originalFrame;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    replacementBufferMilliseconds: 2_000,
+    fastRecoveryAttempts: 3,
+    recoveryCooldownMilliseconds: 30_000,
+    scheduleRecovery(callback, milliseconds) {
+      scheduled.push({ callback, milliseconds });
+      return scheduled.length;
+    },
+    cancelRecovery() {},
+    onTranslationAvailability(value) { availability.push(value); },
+    audioGateway: {
+      async translationSink() {
+        return { async capture(pcm) { captured.push(pcm.readInt16LE(0)); } };
+      },
+      async subscribeOriginal(_trackName, onFrame) {
+        originalFrame = onFrame;
+        return { async close() {} };
+      },
+    },
+    geminiFactory(options) {
+      const index = clients.length;
+      const client = {
+        connect() {
+          if (index === 0 || index === 4) options.onSetupComplete();
+          else options.onError(new Error(`replacement-${index}-failed`));
+        },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16(pcm) { sent.push({ client: index, marker: pcm.readInt16LE(0) }); return true; },
+        close() {},
+      };
+      clients.push({ client, options });
+      return client;
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" });
+  clients[0].options.onClose();
+  await waitUntil(() => availability.at(-1) === "unavailable");
+  assert.equal(clients.length, 4);
+  assert.deepEqual(availability, ["reconnecting", "unavailable"]);
+  assert.equal(scheduled[0].milliseconds, 30_000);
+
+  for (let marker = 1; marker <= 25; marker += 1) {
+    const frame = Buffer.alloc(3_200);
+    frame.writeInt16LE(marker);
+    originalFrame(frame, 16_000);
+  }
+  await clients[0].options.onTranslatedAudio(Buffer.from([99, 0]).toString("base64"));
+  assert.deepEqual(captured, []);
+
+  scheduled[0].callback();
+  await waitUntil(() => availability.at(-1) === "available");
+  assert.equal(clients.length, 5);
+  assert.deepEqual(sent.filter(({ client }) => client === 4).map(({ marker }) => marker),
+    [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+  await bridge.abort();
+});
+
 test("stop closes Gemini and permits restart even when subscription cleanup fails", async () => {
   const clients = [];
   let subscriptionCount = 0;
@@ -566,4 +633,12 @@ function deferredForBridgeTest() {
   let resolve;
   const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
+}
+
+async function waitUntil(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error("condition was not reached");
 }

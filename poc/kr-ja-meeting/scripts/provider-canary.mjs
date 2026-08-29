@@ -19,7 +19,6 @@ import { AccessToken } from "livekit-server-sdk";
 import WebSocket from "ws";
 
 import { GeminiLiveTranslateSocket } from "../src/gemini-live-socket.mjs";
-import { MemoryResumptionHandleStore } from "../src/gemini-session.mjs";
 import {
   GEMINI_INPUT_SAMPLE_RATE,
   ProviderCanaryEvidence,
@@ -31,7 +30,6 @@ const livekitUrl = process.env.LIVEKIT_URL ?? "ws://127.0.0.1:7880";
 const livekitApiKey = process.env.LIVEKIT_API_KEY ?? "devkey";
 const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
 const roomName = `kr-ja-canary-${Date.now()}`;
-const handles = new MemoryResumptionHandleStore();
 const evidence = new ProviderCanaryEvidence();
 const rooms = [];
 const localTracks = [];
@@ -303,7 +301,6 @@ async function run() {
 
   const setup = deferred();
   const firstTranslatedFrame = deferred();
-  const resumptionHandle = deferred();
   let translatedFrames = 0;
   const serverEventCounts = {};
   let captureChain = Promise.resolve();
@@ -311,12 +308,10 @@ async function run() {
     apiKey,
     meetingId: roomName,
     targetLanguage: "ko",
-    handleStore: handles,
     socketFactory: (url) => new WebSocket(url),
     openState: WebSocket.OPEN,
     automaticActivityDetection: false,
     onSetupComplete: setup.resolve,
-    onResumptionHandle: resumptionHandle.resolve,
     onError: setup.reject,
     onServerEvent(event) {
       for (const name of Object.keys(event)) {
@@ -398,26 +393,23 @@ async function run() {
     koreanTranslationPublication1.subscribed && !koreanOriginalPublication.subscribed,
   );
 
-  await withTimeout(resumptionHandle.promise, "Gemini resumption handle", 45_000);
-  evidence.record("resumptionHandleReceived", handles.size > 0);
   await captureChain;
   gemini.close();
 
-  const resumedSetup = deferred();
-  const resumedGemini = new GeminiLiveTranslateSocket({
+  const freshSetup = deferred();
+  const freshGemini = new GeminiLiveTranslateSocket({
     apiKey,
     meetingId: roomName,
     targetLanguage: "ko",
-    handleStore: handles,
     socketFactory: (url) => new WebSocket(url),
     openState: WebSocket.OPEN,
-    onSetupComplete: resumedSetup.resolve,
-    onError: resumedSetup.reject,
+    onSetupComplete: freshSetup.resolve,
+    onError: freshSetup.reject,
   });
-  resumedGemini.connect();
-  await withTimeout(resumedSetup.promise, "resumed Gemini setup", 30_000);
-  evidence.record("resumptionHandleReused", true);
-  resumedGemini.close();
+  freshGemini.connect();
+  await withTimeout(freshSetup.promise, "fresh Gemini setup", 30_000);
+  evidence.record("freshSessionSetup", true);
+  freshGemini.close();
 
   if (!evidence.complete) {
     throw new Error(`provider evidence incomplete: ${JSON.stringify(evidence.snapshot())}`);

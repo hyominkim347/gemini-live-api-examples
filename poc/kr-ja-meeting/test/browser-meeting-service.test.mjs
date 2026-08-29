@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { BrowserMeetingService } from "../src/browser-meeting-service.mjs";
 import { GeminiLiveTranslateSocket } from "../src/gemini-live-socket.mjs";
-import { MemoryResumptionHandleStore } from "../src/gemini-session.mjs";
 import { LiveTranslationBridge } from "../src/live-translation-bridge.mjs";
 
 class FakeSocket {
@@ -578,6 +577,10 @@ test("provider reconnect hook exposes fallback immediately without disconnecting
   const repeatedReconnect = await service.translationAvailability("reconnecting");
   assert.equal(repeatedReconnect.translationAvailabilityChangedAt, 900);
 
+  const unavailable = await service.translationAvailability("unavailable");
+  assert.equal(unavailable.translationAvailability, "unavailable");
+  assert.equal(unavailable.participants.find(({ id }) => id === listener.id).audio.mode, "original-fallback");
+
   now = 1_000;
   const recovered = await service.translationAvailability("available");
 
@@ -588,11 +591,17 @@ test("provider reconnect hook exposes fallback immediately without disconnecting
   assert.equal(recovered.participants.find(({ id }) => id === listener.id).microphone, "unmuted");
 });
 
-test("automatic speech keeps its utterance id while an expired Gemini session retries", async () => {
+test("the last participant leaving disposes the meeting-only glossary hook", async () => {
+  let emptyCalls = 0;
+  const { service } = createService({ onMeetingEmpty() { emptyCalls += 1; } });
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+  await service.leave(participant.id);
+  assert.equal(emptyCalls, 1);
+});
+
+test("automatic speech keeps its utterance id while a fresh Gemini session replaces setup failure", async () => {
   const sockets = [];
   const retryEvents = [];
-  const handles = new MemoryResumptionHandleStore();
-  handles.set("browser-poc", "ko", "expired-handle");
   const bridge = new LiveTranslationBridge({
     meetingId: "browser-poc",
     continuousInput: true,
@@ -604,7 +613,6 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
       return new GeminiLiveTranslateSocket({
         ...callbacks,
         apiKey: "test-only-key",
-        handleStore: handles,
         socketFactory(url) {
           const socket = new FakeSocket(url);
           sockets.push(socket);
@@ -612,9 +620,9 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
         },
         openState: FakeSocket.OPEN,
         automaticActivityDetection: true,
-        onServerEvent(event) { retryEvents.push(event); },
       });
     },
+    eventRecorder: { record(event) { retryEvents.push(event); } },
   });
   const { service } = createService({ translationBridge: bridge });
   const { participant } = await service.join({ name: "Yuki", language: "ja" });
@@ -629,6 +637,7 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
   sockets[0].emit("open");
   sockets[0].emit("close", 1008, "BidiGenerateContent session not found");
 
+  await waitFor(() => sockets.length === 2);
   assert.equal(sockets.length, 2);
   assert.equal(service.snapshot().activeUtteranceId, "utterance-1");
   sockets[1].emit("open");
@@ -636,10 +645,7 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
   const state = await speechStart;
 
   assert.equal(state.activeUtteranceId, "utterance-1");
-  assert.deepEqual(retryEvents.filter(({ type }) => type === "resumption-retry").map(({ outcome }) => outcome), [
-    "started",
-    "succeeded",
-  ]);
+  assert.equal(retryEvents.filter(({ type }) => type === "gemini-retry-failed").length, 1);
   sockets[1].emit("message", JSON.stringify({
     serverContent: {
       modelTurn: { parts: [{ inlineData: { data: Buffer.from([1, 2]).toString("base64") } }] },
@@ -654,11 +660,9 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
   await service.mic(participant.id, false);
 });
 
-test("a second setup failure stops retrying and cleans the automatic speech state", async () => {
+test("three fresh setup failures clean the automatic speech state", async () => {
   const sockets = [];
   const retryEvents = [];
-  const handles = new MemoryResumptionHandleStore();
-  handles.set("browser-poc", "ko", "expired-handle");
   const bridge = new LiveTranslationBridge({
     meetingId: "browser-poc",
     continuousInput: true,
@@ -670,7 +674,6 @@ test("a second setup failure stops retrying and cleans the automatic speech stat
       return new GeminiLiveTranslateSocket({
         ...callbacks,
         apiKey: "test-only-key",
-        handleStore: handles,
         socketFactory(url) {
           const socket = new FakeSocket(url);
           sockets.push(socket);
@@ -678,9 +681,9 @@ test("a second setup failure stops retrying and cleans the automatic speech stat
         },
         openState: FakeSocket.OPEN,
         automaticActivityDetection: true,
-        onServerEvent(event) { retryEvents.push(event); },
       });
     },
+    eventRecorder: { record(event) { retryEvents.push(event); } },
   });
   const { service } = createService({ translationBridge: bridge });
   const { participant } = await service.join({ name: "Yuki", language: "ja" });
@@ -694,17 +697,18 @@ test("a second setup failure stops retrying and cleans the automatic speech stat
   await waitFor(() => sockets.length === 1);
   sockets[0].emit("open");
   sockets[0].emit("close", 1008, "BidiGenerateContent session not found");
+  await waitFor(() => sockets.length === 2);
   sockets[1].emit("open");
   sockets[1].emit("close", 1008, "BidiGenerateContent session not found");
+  await waitFor(() => sockets.length === 3);
+  sockets[2].emit("open");
+  sockets[2].emit("close", 1008, "BidiGenerateContent session not found");
 
   await assert.rejects(speechStart, /Gemini closed during setup/);
-  assert.equal(sockets.length, 2);
+  assert.equal(sockets.length, 3);
   assert.equal(service.snapshot().activeSpeakerId, null);
   assert.equal(service.snapshot().activeUtteranceId, null);
   assert.equal(service.snapshot().participants[0].speech, "silent");
-  assert.deepEqual(retryEvents.filter(({ type }) => type === "resumption-retry").map(({ outcome }) => outcome), [
-    "started",
-    "failed",
-  ]);
+  assert.equal(retryEvents.filter(({ type }) => type === "gemini-retry-failed").length, 3);
   await service.mic(participant.id, false);
 });

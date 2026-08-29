@@ -14,7 +14,6 @@ import {
   openBrowserPlayout,
 } from "../src/browser-playout-harness.mjs";
 import { GeminiLiveTranslateSocket } from "../src/gemini-live-socket.mjs";
-import { MemoryResumptionHandleStore } from "../src/gemini-session.mjs";
 import { LiveKitAudioGateway } from "../src/livekit-audio-gateway.mjs";
 import { pcm16Rms, withTimeout } from "../src/playout-continuity.mjs";
 import {
@@ -136,7 +135,6 @@ async function runOnce({ run, inputPcm, inputSha256 }) {
       apiKey: geminiApiKey,
       meetingId: roomName,
       targetLanguage: "ja",
-      handleStore: new MemoryResumptionHandleStore(),
       socketFactory: (url) => new WebSocket(url),
       openState: WebSocket.OPEN,
       automaticActivityDetection: false,

@@ -2,13 +2,13 @@
 
 Google의 [Live Translate LiveKit 예제](https://github.com/google-gemini/gemini-live-translate-livekit)가 사용하는 두 핵심 seam을 한국어·일본어 동적 회의에 맞춰 최소화한 로컬 PoC입니다.
 
-- Gemini Live: `translationConfig`로 언어별 음성 번역, `sessionResumption` ON
+- Gemini Live: `translationConfig`로 언어별 음성을 번역하고, 끊기면 이전 대화 없이 새 ZDR 세션으로 복구
 - LiveKit: `autoSubscribe: false`에서 청취 계획에 포함된 원음·통역 트랙만 `setSubscribed()`
 - 참가 경험: 이름과 언어로 입장하고 일반 회의처럼 마이크만 켜고 끔
 - 발화 경험: 마이크가 켜진 무음 상태를 유지할 수 있고, VAD가 발화 시작과 끝을 자동 전달
 - 현재 통역 규칙: 겹침 발화를 막지 않고 하나의 통역 초점을 유지한 뒤 안전하게 넘김
 - 초점 유지 규칙: 첫 화자는 즉시 선택하고, 겹침 후보는 설정된 최소 시간 동안 계속 말한 경우에만 종료된 화자의 다음 초점이 됨
-- 데이터 경계: resumption handle은 메모리에만 두고 회의 종료 시 폐기
+- 데이터 경계: session resumption handle을 사용하지 않고, 회의 용어집은 메모리에만 두며 빈 회의에서 폐기
 - 미사용: File API, explicit cache, Grounding, 입력·출력 전사, 애플리케이션 음성 로그
 
 ## 로컬 tracer 실행
@@ -58,11 +58,11 @@ npm install
 npm run canary:provider
 ```
 
-이 canary는 합성 일본어 음성을 `original:ja-1`로 게시하고, 번역 bot이 Gemini Live Translate의 한국어 PCM을 `translation:ko`로 다시 게시하는 기존 실제 provider 경로입니다. 첫 세션의 resumption handle은 메모리에만 보관하고 두 번째 Gemini 연결 setup에 재사용합니다. 성공 출력에는 key, handle, 음성, 전사 내용이 포함되지 않습니다.
+이 canary는 합성 일본어 음성을 `original:ja-1`로 게시하고, 번역 bot이 Gemini Live Translate의 한국어 PCM을 `translation:ko`로 다시 게시하는 실제 provider 경로입니다. 연결이 끊기면 resumption handle 없이 새 ZDR 세션을 사용합니다. 성공 출력에는 key, 음성, 전사 내용이 포함되지 않습니다.
 
 ## 실제 어댑터 연결
 
-- `src/gemini-live-socket.mjs`는 공식 `BidiGenerateContent` WebSocket 메시지 형태로 setup, PCM 입력, 번역 PCM 출력, resumption handle 갱신을 구현합니다. API key는 생성자 주입만 허용하며 파일에 쓰지 않습니다.
+- `src/gemini-live-socket.mjs`는 공식 `BidiGenerateContent` WebSocket 메시지 형태로 ZDR setup, PCM 입력, 번역 PCM 출력을 구현합니다. API key는 생성자 주입만 허용하며 파일에 쓰지 않습니다.
 - `src/livekit-subscriptions.mjs`는 LiveKit `Room`의 remote audio publications에 대해 청취 계획의 모든 트랙을 구독합니다.
 - `src/meeting-session.mjs`가 동적 roster, 마이크와 발화 상태, 통역 초점과 참가자별 청취 모드를 관리하는 단일 상태 원본입니다.
 - `src/speech-activity-detector.mjs`는 음량 관측을 자동 `speech-start`·`speech-end` event로 바꾸는 교체 가능한 경계입니다.

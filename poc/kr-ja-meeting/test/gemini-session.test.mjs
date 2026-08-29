@@ -1,58 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  MemoryResumptionHandleStore,
-  buildGeminiSetup,
-} from "../src/gemini-session.mjs";
+import { MemoryMeetingGlossary, buildGeminiSetup } from "../src/gemini-session.mjs";
 
-test("Gemini setup enables directional audio translation and session resumption only", () => {
-  assert.deepEqual(buildGeminiSetup({ targetLanguage: "ko" }), {
-    setup: {
-      model: "models/gemini-3.5-live-translate-preview",
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        translationConfig: {
-          targetLanguageCode: "ko",
-          echoTargetLanguage: true,
-        },
-      },
-      realtimeInputConfig: {
-        automaticActivityDetection: { disabled: false },
-      },
-      sessionResumption: {},
-    },
-  });
-
-  const resumed = buildGeminiSetup({
-    targetLanguage: "ja",
-    resumptionHandle: "opaque-handle",
-  });
-  assert.deepEqual(resumed.setup.sessionResumption, { handle: "opaque-handle" });
-  assert.equal("tools" in resumed.setup, false);
-  assert.equal("inputAudioTranscription" in resumed.setup, false);
-  assert.equal("outputAudioTranscription" in resumed.setup, false);
-
-  const manualActivity = buildGeminiSetup({
+test("Gemini setup is ZDR and carries only direction plus an in-memory glossary", () => {
+  const setup = buildGeminiSetup({
     targetLanguage: "ko",
-    automaticActivityDetection: false,
+    glossary: [
+      { source: "入館証", target: "출입증" },
+      { source: "稟議", target: "품의" },
+    ],
   });
-  assert.deepEqual(
-    manualActivity.setup.realtimeInputConfig.automaticActivityDetection,
-    { disabled: true },
-  );
+
+  assert.equal("sessionResumption" in setup.setup, false);
+  assert.equal("clientContent" in setup, false);
+  assert.equal("tools" in setup.setup, false);
+  assert.equal(setup.setup.generationConfig.translationConfig.targetLanguageCode, "ko");
+  assert.match(setup.setup.systemInstruction.parts[0].text, /入館証 => 출입증/);
+  assert.match(setup.setup.systemInstruction.parts[0].text, /稟議 => 품의/);
 });
 
-test("resumption handles exist only in memory and are cleared with the meeting", () => {
-  const handles = new MemoryResumptionHandleStore();
+test("meeting glossary stays in memory and can be disposed", () => {
+  const glossary = new MemoryMeetingGlossary();
+  glossary.replace([{ source: "申請", target: "신청" }]);
+  const copy = glossary.entries();
+  copy[0].target = "changed";
 
-  handles.set("meeting-1", "ko", "ko-handle");
-  handles.set("meeting-1", "ja", "ja-handle");
-  assert.equal(handles.get("meeting-1", "ko"), "ko-handle");
-  assert.equal(handles.size, 2);
-
-  handles.clearMeeting("meeting-1");
-  assert.equal(handles.get("meeting-1", "ko"), null);
-  assert.equal(handles.get("meeting-1", "ja"), null);
-  assert.equal(handles.size, 0);
+  assert.deepEqual(glossary.entries(), [{ source: "申請", target: "신청" }]);
+  glossary.clear();
+  assert.equal(glossary.size, 0);
 });

@@ -7,8 +7,7 @@ const REQUIRED_EVIDENCE = new Map([
   ["translationTrackSubscribed", (value) => value === true],
   ["listenerReceivedTranslatedAudio", (value) => value === true],
   ["phraseBoundary", (value) => value === true],
-  ["resumptionHandleReceived", (value) => value === true],
-  ["resumptionHandleReused", (value) => value === true],
+  ["freshSessionSetup", (value) => value === true],
   ["originalCheckExclusive", (value) => value === true],
   ["translationRestoredAtBoundary", (value) => value === true],
 ]);

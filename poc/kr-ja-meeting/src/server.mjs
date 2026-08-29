@@ -6,7 +6,7 @@ import WebSocket from "ws";
 
 import { BrowserMeetingService } from "./browser-meeting-service.mjs";
 import { GeminiLiveTranslateSocket } from "./gemini-live-socket.mjs";
-import { MemoryResumptionHandleStore } from "./gemini-session.mjs";
+import { MemoryMeetingGlossary } from "./gemini-session.mjs";
 import { LiveTranslationBridge } from "./live-translation-bridge.mjs";
 import { LiveKitAudioGateway } from "./livekit-audio-gateway.mjs";
 import {
@@ -41,7 +41,8 @@ await translatorRoom.connect(
 );
 const audioGateway = new LiveKitAudioGateway(translatorRoom, { eventRecorder });
 await audioGateway.initialize();
-const handles = new MemoryResumptionHandleStore();
+const glossary = new MemoryMeetingGlossary();
+let service;
 const translationBridge = new LiveTranslationBridge({
   meetingId: roomName,
   audioGateway,
@@ -49,20 +50,22 @@ const translationBridge = new LiveTranslationBridge({
     return new GeminiLiveTranslateSocket({
       ...callbacks,
       apiKey: geminiApiKey,
-      handleStore: handles,
+      glossary: glossary.entries(),
       socketFactory: (url) => new WebSocket(url),
       openState: WebSocket.OPEN,
       automaticActivityDetection: true,
     });
   },
   continuousInput: true,
+  onTranslationAvailability: (availability) => service?.translationAvailability(availability),
   eventRecorder,
 });
-const service = new BrowserMeetingService({
+service = new BrowserMeetingService({
   roomName,
   livekitUrl,
   tokenIssuer: (participant) => tokenFor(participant.id, participant.name, true),
   translationBridge,
+  onMeetingEmpty: () => glossary.clear(),
   eventRecorder,
 });
 const vendorFiles = new Map([
@@ -82,7 +85,7 @@ async function close() {
   if (closing) return;
   closing = true;
   segmentTraceStore.close();
-  handles.clearMeeting(roomName);
+  glossary.clear();
   server.close();
   await translationBridge.abort().catch(() => {});
   await audioGateway.close();

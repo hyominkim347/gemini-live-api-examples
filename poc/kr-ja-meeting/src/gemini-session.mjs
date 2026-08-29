@@ -2,15 +2,15 @@ const TARGET_LANGUAGES = new Set(["ko", "ja"]);
 
 export function buildGeminiSetup({
   targetLanguage,
-  resumptionHandle = null,
+  glossary = [],
   automaticActivityDetection = true,
 }) {
   if (!TARGET_LANGUAGES.has(targetLanguage)) {
     throw new Error(`unsupported target language: ${targetLanguage}`);
   }
 
-  return {
-    setup: {
+  const terms = validateGlossary(glossary);
+  const setup = {
       model: "models/gemini-3.5-live-translate-preview",
       generationConfig: {
         responseModalities: ["AUDIO"],
@@ -22,47 +22,49 @@ export function buildGeminiSetup({
       realtimeInputConfig: {
         automaticActivityDetection: { disabled: !automaticActivityDetection },
       },
-      sessionResumption: resumptionHandle
-        ? { handle: resumptionHandle }
-        : {},
-    },
   };
+  if (terms.length > 0) {
+    setup.systemInstruction = {
+      parts: [{
+        text: [
+          "Use these meeting glossary pairs when translating. Do not add conversation history:",
+          ...terms.map(({ source, target }) => `${source} => ${target}`),
+        ].join("\n"),
+      }],
+    };
+  }
+  return { setup };
 }
 
-export class MemoryResumptionHandleStore {
-  #handles = new Map();
+export class MemoryMeetingGlossary {
+  #entries = [];
 
   get size() {
-    return this.#handles.size;
+    return this.#entries.length;
   }
 
-  get(meetingId, targetLanguage) {
-    return this.#handles.get(this.#key(meetingId, targetLanguage)) ?? null;
+  replace(entries) {
+    this.#entries = validateGlossary(entries);
   }
 
-  set(meetingId, targetLanguage, handle) {
-    if (!meetingId || !handle) {
-      throw new Error("meetingId and handle are required");
+  entries() {
+    return this.#entries.map((entry) => ({ ...entry }));
+  }
+
+  clear() {
+    this.#entries = [];
+  }
+}
+
+function validateGlossary(entries) {
+  if (!Array.isArray(entries)) throw new Error("glossary must be an array");
+  return entries.map((entry) => {
+    if (typeof entry?.source !== "string" || !entry.source.trim()) {
+      throw new Error("glossary source is required");
     }
-    if (!TARGET_LANGUAGES.has(targetLanguage)) {
-      throw new Error(`unsupported target language: ${targetLanguage}`);
+    if (typeof entry?.target !== "string" || !entry.target.trim()) {
+      throw new Error("glossary target is required");
     }
-    this.#handles.set(this.#key(meetingId, targetLanguage), handle);
-  }
-
-  delete(meetingId, targetLanguage) {
-    this.#handles.delete(this.#key(meetingId, targetLanguage));
-  }
-
-  clearMeeting(meetingId) {
-    for (const key of this.#handles.keys()) {
-      if (key.startsWith(`${meetingId}:`)) {
-        this.#handles.delete(key);
-      }
-    }
-  }
-
-  #key(meetingId, targetLanguage) {
-    return `${meetingId}:${targetLanguage}`;
-  }
+    return { source: entry.source.trim(), target: entry.target.trim() };
+  });
 }

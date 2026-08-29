@@ -8,6 +8,12 @@ export class LiveTranslationBridge {
   #firstAudioTimeoutMilliseconds;
   #continuousInput;
   #preRollMilliseconds;
+  #replacementBufferMilliseconds;
+  #fastRecoveryAttempts;
+  #recoveryCooldownMilliseconds;
+  #scheduleRecovery;
+  #cancelRecovery;
+  #onTranslationAvailability;
   #clock;
   #eventRecorder;
   #preparedInputs = new Map();
@@ -24,6 +30,12 @@ export class LiveTranslationBridge {
     firstAudioTimeoutMilliseconds = 5_000,
     continuousInput = false,
     preRollMilliseconds = 1_000,
+    replacementBufferMilliseconds = 2_000,
+    fastRecoveryAttempts = 3,
+    recoveryCooldownMilliseconds = 30_000,
+    scheduleRecovery = (callback, milliseconds) => setTimeout(callback, milliseconds),
+    cancelRecovery = (timer) => clearTimeout(timer),
+    onTranslationAvailability = () => {},
     clock = () => performance.now(),
     eventRecorder = { record() {} },
   }) {
@@ -40,6 +52,15 @@ export class LiveTranslationBridge {
       throw new Error("preRollMilliseconds must be a positive number");
     }
     this.#preRollMilliseconds = preRollMilliseconds;
+    this.#replacementBufferMilliseconds = replacementBufferMilliseconds;
+    this.#fastRecoveryAttempts = fastRecoveryAttempts;
+    this.#recoveryCooldownMilliseconds = recoveryCooldownMilliseconds;
+    this.#scheduleRecovery = scheduleRecovery;
+    this.#cancelRecovery = cancelRecovery;
+    if (typeof onTranslationAvailability !== "function") {
+      throw new Error("onTranslationAvailability must be a function");
+    }
+    this.#onTranslationAvailability = onTranslationAvailability;
     if (typeof clock !== "function") throw new Error("translation bridge clock is required");
     this.#clock = clock;
     if (!eventRecorder || typeof eventRecorder.record !== "function") {
@@ -141,48 +162,142 @@ export class LiveTranslationBridge {
       preparedInput = this.#preparedInputs.get(speaker.id);
       const sink = await this.#audioGateway.translationSink(targetLanguage);
       this.#throwIfAborted(startRevision);
-      const setup = deferred();
-      gemini = this.#geminiFactory({
-        meetingId: this.#meetingId,
-        targetLanguage,
-        participantId: speaker.id,
-        utteranceId,
-        eventRecorder: this.#eventRecorder,
-        onSetupComplete: setup.resolve,
-        onGenerationComplete() { outputCompleted = true; },
-        onTurnComplete() { outputCompleted = true; },
-        onClose() { setup.reject(new Error("Gemini closed during setup")); },
-        onError: setup.reject,
-        onTranslatedAudio: (base64Audio) => {
-          if (!acceptingOutput) return Promise.resolve();
-          const generation = outputGeneration;
-          const pcm = Buffer.from(base64Audio, "base64");
-          if (hasAudiblePcm(pcm)) {
-            audibleOutputReceived = true;
-            lastTranslatedAudioAt = Date.now();
-            if (!outputRecorded) {
-              outputRecorded = true;
-              this.#record("gemini-output-received", context, { result: "received" });
-            }
+      let active;
+      let providerState;
+      let recovering = false;
+      let recoveryTimer = null;
+      const recoveryBuffer = createDurationBuffer(this.#replacementBufferMilliseconds);
+      const notifyAvailability = (availability) => {
+        try {
+          void Promise.resolve(this.#onTranslationAvailability(availability)).catch(() => {});
+        } catch {
+          // Meeting state reporting cannot break provider recovery.
+        }
+      };
+      const captureTranslatedAudio = (base64Audio, generation) => {
+        if (!acceptingOutput || generation !== outputGeneration) return Promise.resolve();
+        const pcm = Buffer.from(base64Audio, "base64");
+        if (hasAudiblePcm(pcm)) {
+          audibleOutputReceived = true;
+          lastTranslatedAudioAt = Date.now();
+          if (!outputRecorded) {
+            outputRecorded = true;
+            this.#record("gemini-output-received", context, { result: "received" });
           }
-          captureChain = captureChain.then(async () => {
-            if (!acceptingOutput || generation !== outputGeneration) return;
-            const capture = await sink.capture(pcm);
-            if (!acceptingOutput || generation !== outputGeneration) return;
-            if (Number.isFinite(capture?.queuedAfterMs)) {
-              this.#record("livekit-queue-updated", context, {
-                queueDurationMs: capture.queuedAfterMs,
-                result: "queued",
-              });
-            }
+        }
+        captureChain = captureChain.then(async () => {
+          if (!acceptingOutput || generation !== outputGeneration) return;
+          const capture = await sink.capture(pcm);
+          if (!acceptingOutput || generation !== outputGeneration) return;
+          if (Number.isFinite(capture?.queuedAfterMs)) {
+            this.#record("livekit-queue-updated", context, {
+              queueDurationMs: capture.queuedAfterMs,
+              result: "queued",
+            });
+          }
+        });
+        return captureChain;
+      };
+      const connectFresh = async () => {
+        const setup = deferred();
+        const state = { intentional: false, setupComplete: false, client: null };
+        const generation = ++outputGeneration;
+        const client = this.#geminiFactory({
+          meetingId: this.#meetingId,
+          targetLanguage,
+          participantId: speaker.id,
+          utteranceId: context.utteranceId,
+          eventRecorder: this.#eventRecorder,
+          onSetupComplete() {
+            state.setupComplete = true;
+            setup.resolve();
+          },
+          onGenerationComplete() {
+            if (generation === outputGeneration) outputCompleted = true;
+          },
+          onTurnComplete() {
+            if (generation === outputGeneration) outputCompleted = true;
+          },
+          onClose() {
+            if (state.intentional) return;
+            if (!state.setupComplete) setup.reject(new Error("Gemini closed during setup"));
+            else void recoverProvider();
+          },
+          onError(error) {
+            if (state.intentional) return;
+            if (!state.setupComplete) setup.reject(error);
+            else void recoverProvider();
+          },
+          onTranslatedAudio: (base64Audio) => captureTranslatedAudio(base64Audio, generation),
+        });
+        state.client = client;
+        this.#startingClient = client;
+        client.connect();
+        try {
+          await withTimeout(setup.promise, "Gemini setup", 20_000);
+        } catch (error) {
+          state.intentional = true;
+          client.close();
+          throw error;
+        }
+        return state;
+      };
+      const replaceWithFastRetries = async () => {
+        let lastError;
+        for (let attempt = 1; attempt <= this.#fastRecoveryAttempts; attempt += 1) {
+          try {
+            return await connectFresh();
+          } catch (error) {
+            lastError = error;
+            this.#record("gemini-retry-failed", context, {
+              result: "failed",
+              errorCode: "fresh-session-setup-failed",
+            });
+          }
+        }
+        throw lastError;
+      };
+      const recoverProvider = async () => {
+        if (recovering || !acceptingInput || !active) return;
+        recovering = true;
+        providerState.intentional = true;
+        providerState.client.close();
+        outputGeneration += 1;
+        notifyAvailability("reconnecting");
+        this.#record("gemini-retry-started", context, { result: "started" });
+        try {
+          const next = await replaceWithFastRetries();
+          if (!acceptingInput || this.#active !== active) {
+            next.intentional = true;
+            next.client.close();
+            return;
+          }
+          providerState = next;
+          gemini = next.client;
+          active.gemini = gemini;
+          for (const frame of recoveryBuffer.take()) {
+            gemini.sendPcm16(frame.pcm, frame.sampleRate);
+          }
+          notifyAvailability("available");
+          this.#record("gemini-retry-succeeded", context, { result: "succeeded" });
+        } catch {
+          notifyAvailability("unavailable");
+          this.#record("gemini-retry-failed", context, {
+            result: "unavailable",
+            errorCode: "recovery-cooldown",
           });
-          return captureChain;
-        },
-      });
-      this.#startingClient = gemini;
+          recoveryTimer = this.#scheduleRecovery(() => {
+            recoveryTimer = null;
+            recovering = false;
+            void recoverProvider();
+          }, this.#recoveryCooldownMilliseconds);
+        } finally {
+          if (!recoveryTimer) recovering = false;
+        }
+      };
 
-      gemini.connect();
-      await withTimeout(setup.promise, "Gemini setup", 20_000);
+      providerState = await replaceWithFastRetries();
+      gemini = providerState.client;
       this.#record("gemini-setup-succeeded", context, { result: "succeeded" });
       setupSucceeded = true;
       this.#throwIfAborted(startRevision);
@@ -200,13 +315,15 @@ export class LiveTranslationBridge {
               this.#record("gemini-input-received", context, { result: "received" });
             }
           }
-          if (!gemini.sendPcm16(pcm, sampleRate)) {
+          if (recovering) {
+            recoveryBuffer.push(pcm, sampleRate);
+          } else if (!gemini.sendPcm16(pcm, sampleRate)) {
             throw new Error("Gemini PCM frame was not sent");
           }
       };
       preparedInput.forwardTo(sendInput);
       this.#throwIfAborted(startRevision);
-      this.#active = {
+      active = {
         context,
         gemini,
         preparedInput,
@@ -254,7 +371,16 @@ export class LiveTranslationBridge {
           }
         },
         cancelAudioDrain() { audioDrainGeneration += 1; },
+        closeProvider: () => {
+          if (recoveryTimer) {
+            this.#cancelRecovery(recoveryTimer);
+            recoveryTimer = null;
+          }
+          providerState.intentional = true;
+          providerState.client.close();
+        },
       };
+      this.#active = active;
     } catch (error) {
       if (!setupSucceeded) {
         this.#record("gemini-setup-failed", context, {
@@ -328,7 +454,7 @@ export class LiveTranslationBridge {
     const closeGemini = () => {
       if (geminiClosed) return;
       geminiClosed = true;
-      active.gemini.close();
+      active.closeProvider();
     };
     try {
       results.push(sentInputEnd
@@ -372,7 +498,7 @@ export class LiveTranslationBridge {
     active.detachInput();
     active.cancelAudioDrain();
     const queueDurationMs = active.interruptOutput();
-    active.gemini.close();
+    active.closeProvider();
     const interruptionMilliseconds = Math.max(0, this.#clock() - interruptedAt);
     this.#record("translation-interrupted", active.context, {
       relatedParticipantId: speaker.id,
@@ -416,7 +542,7 @@ export class LiveTranslationBridge {
     active.detachInput();
     active.cancelAudioDrain();
     const results = await Promise.all([settle(active.capture())]);
-    active.gemini.close();
+    active.closeProvider();
     this.#record("gemini-output-aborted", active.context, {
       result: "aborted",
       errorCode: "translation-aborted",
@@ -480,6 +606,28 @@ function createPreparedInput(speaker, preRollMilliseconds) {
       frames = [];
       bufferedMilliseconds = 0;
       forward = null;
+    },
+  };
+}
+
+function createDurationBuffer(maximumMilliseconds) {
+  let frames = [];
+  let bufferedMilliseconds = 0;
+  return {
+    push(pcm, sampleRate) {
+      const bytes = Buffer.isBuffer(pcm) ? Buffer.from(pcm) : Buffer.from(pcm);
+      const durationMilliseconds = bytes.byteLength / 2 / sampleRate * 1_000;
+      frames.push({ pcm: bytes, sampleRate, durationMilliseconds });
+      bufferedMilliseconds += durationMilliseconds;
+      while (frames.length > 0 && bufferedMilliseconds > maximumMilliseconds) {
+        bufferedMilliseconds -= frames.shift().durationMilliseconds;
+      }
+    },
+    take() {
+      const buffered = frames;
+      frames = [];
+      bufferedMilliseconds = 0;
+      return buffered;
     },
   };
 }

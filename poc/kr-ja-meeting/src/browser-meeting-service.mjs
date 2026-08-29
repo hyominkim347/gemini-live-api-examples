@@ -25,6 +25,7 @@ export class BrowserMeetingService {
   #translationFocusPolicy;
   #onListeningEvent;
   #eventRecorder;
+  #onMeetingEmpty;
   #clock;
   #listeningPlanKeyByParticipantId = new Map();
   #issuedPlayoutContextByParticipantId = new Map();
@@ -45,6 +46,7 @@ export class BrowserMeetingService {
     overlapWarningMilliseconds,
     onListeningEvent = () => {},
     eventRecorder = { record() {} },
+    onMeetingEmpty = () => {},
   }) {
     if (!roomName || !livekitUrl || !tokenIssuer || !translationBridge) {
       throw new Error("roomName, livekitUrl, tokenIssuer, and translationBridge are required");
@@ -67,6 +69,8 @@ export class BrowserMeetingService {
     }
     this.#onListeningEvent = onListeningEvent;
     this.#eventRecorder = eventRecorder;
+    if (typeof onMeetingEmpty !== "function") throw new Error("onMeetingEmpty must be a function");
+    this.#onMeetingEmpty = onMeetingEmpty;
   }
 
   join({ name, language } = {}) {
@@ -99,6 +103,7 @@ export class BrowserMeetingService {
         await this.#releaseParticipantTranslation(participantId);
       } finally {
         this.#session.leave(participantId);
+        if (this.#session.participants.length === 0) this.#onMeetingEmpty();
       }
       this.#recordParticipant("meeting-left", participant, { result: "left" });
       this.#recordParticipant("resources-closed", participant, { result: "closed" });
