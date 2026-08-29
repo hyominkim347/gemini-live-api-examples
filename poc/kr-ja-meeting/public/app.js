@@ -33,7 +33,7 @@ function participantById(id) {
 }
 
 function activeParticipant() {
-  return participantById(snapshot.activeSpeakerId);
+  return participantById(snapshot.translationFocusId ?? snapshot.activeSpeakerId);
 }
 
 function localState() {
@@ -81,6 +81,9 @@ function renderMeeting() {
   const featured = active ?? localState() ?? snapshot.participants[0];
   const featuredState = featured?.audio ?? { mode: "silent" };
   const target = active ? (active.language === "ko" ? "ja" : "ko") : null;
+  const overlapWarning = snapshot.overlap?.detected
+    ? `<p class="status-message meeting-status" role="status">${escapeHtml(snapshot.overlap.message)}</p>`
+    : "";
   return `${renderTopbar(active)}<main class="stage-layout">
     <section class="stage-card" aria-label="현재 발화자">
       <div class="stage-ambient"></div>
@@ -99,6 +102,7 @@ function renderMeeting() {
     <aside class="stage-side">
       <div class="side-heading"><div><span class="concept-label">IN THE ROOM</span><h2>참가자 ${snapshot.participants.length}명</h2></div><span class="secure-copy">기록하지 않음</span></div>
       <div class="people-list">${snapshot.participants.map((state) => participantRow(state, active)).join("")}</div>
+      ${overlapWarning}
       ${meetingControls()}
       <p class="status-message meeting-status" aria-live="polite">${escapeHtml(statusMessage)}</p>
     </aside>

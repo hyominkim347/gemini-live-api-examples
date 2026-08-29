@@ -179,6 +179,16 @@ export class LiveTranslationBridge {
     if (failure) throw failure.reason;
   }
 
+  async handoff(speaker) {
+    await this.stop();
+    try {
+      await this.start(speaker);
+    } catch (error) {
+      await settle(this.abort());
+      throw error;
+    }
+  }
+
   async abort() {
     this.#abortRevision += 1;
     const startPromise = this.#startPromise;

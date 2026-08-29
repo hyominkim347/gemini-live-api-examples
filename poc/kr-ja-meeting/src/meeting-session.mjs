@@ -2,8 +2,7 @@ const SUPPORTED_LANGUAGES = new Set(["ko", "ja"]);
 
 export class MeetingSession {
   #participantById = new Map();
-  #activeSpeakerId = null;
-  #activeUtteranceId = null;
+  #translationFocusId = null;
   #listenerModes = new Map();
 
   constructor(participants = []) {
@@ -21,11 +20,21 @@ export class MeetingSession {
   }
 
   get activeSpeakerId() {
-    return this.#activeSpeakerId;
+    return this.#translationFocusId;
   }
 
   get activeUtteranceId() {
-    return this.#activeUtteranceId;
+    return this.#translationFocusId
+      ? this.#participantById.get(this.#translationFocusId)?.utteranceId ?? null
+      : null;
+  }
+
+  get translationFocusId() {
+    return this.#translationFocusId;
+  }
+
+  get speakingParticipantIds() {
+    return this.participants.filter(({ speech }) => speech === "speaking").map(({ id }) => id);
   }
 
   join(participant) {
@@ -43,7 +52,7 @@ export class MeetingSession {
 
   leave(participantId) {
     this.#requireParticipant(participantId);
-    if (participantId === this.#activeSpeakerId) this.endSpeech(participantId);
+    if (this.isSpeaking(participantId)) this.endSpeech(participantId);
     this.#listenerModes.delete(participantId);
     this.#participantById.delete(participantId);
   }
@@ -60,28 +69,35 @@ export class MeetingSession {
       throw new Error(`${participantId} microphone is muted`);
     }
     if (!utteranceId) throw new Error("utteranceId is required");
-    if (participant.speech === "speaking") return this.#activeUtteranceId;
-    if (this.#activeSpeakerId && this.#activeSpeakerId !== participantId) {
-      throw new Error(`${this.#activeSpeakerId} is already speaking`);
-    }
-    this.#activeSpeakerId = participantId;
-    this.#activeUtteranceId = utteranceId;
+    if (participant.speech === "speaking") return participant.utteranceId;
     participant.speech = "speaking";
     participant.utteranceId = utteranceId;
+    if (!this.#translationFocusId) this.#translationFocusId = participantId;
     this.#listenerModes.clear();
     return utteranceId;
   }
 
-  endSpeech(participantId = this.#activeSpeakerId) {
-    if (participantId !== this.#activeSpeakerId) {
-      throw new Error(`${participantId} is not the active speaker`);
-    }
+  endSpeech(participantId = this.#translationFocusId) {
     const participant = this.#requireParticipant(participantId);
+    if (participant.speech !== "speaking") throw new Error(`${participantId} is not speaking`);
     participant.speech = "silent";
     participant.utteranceId = null;
-    this.#activeSpeakerId = null;
-    this.#activeUtteranceId = null;
+    if (this.#translationFocusId === participantId) this.#translationFocusId = null;
     this.#listenerModes.clear();
+  }
+
+  setTranslationFocus(participantId) {
+    if (participantId === null) {
+      this.#translationFocusId = null;
+      return;
+    }
+    const participant = this.#requireParticipant(participantId);
+    if (participant.speech !== "speaking") throw new Error(`${participantId} is not speaking`);
+    this.#translationFocusId = participantId;
+  }
+
+  isSpeaking(participantId) {
+    return this.#requireParticipant(participantId).speech === "speaking";
   }
 
   holdOriginal(listenerId) {
@@ -102,7 +118,7 @@ export class MeetingSession {
 
   audioPlanFor(listenerId) {
     const listener = this.#requireParticipant(listenerId);
-    if (!this.#activeSpeakerId) {
+    if (!this.#translationFocusId) {
       return { original: false, translation: false, trackId: null, mode: "silent" };
     }
 
@@ -137,8 +153,10 @@ export class MeetingSession {
 
   snapshot() {
     return {
-      activeSpeakerId: this.#activeSpeakerId,
-      activeUtteranceId: this.#activeUtteranceId,
+      activeSpeakerId: this.#translationFocusId,
+      translationFocusId: this.#translationFocusId,
+      activeUtteranceId: this.activeUtteranceId,
+      speakingParticipantIds: this.speakingParticipantIds,
       participants: this.participants.map((participant) => ({
         ...participant,
         audio: this.audioPlanFor(participant.id),
@@ -158,8 +176,8 @@ export class MeetingSession {
   }
 
   #activeSpeaker() {
-    if (!this.#activeSpeakerId) throw new Error("no participant is speaking");
-    return this.#participantById.get(this.#activeSpeakerId);
+    if (!this.#translationFocusId) throw new Error("no participant has translation focus");
+    return this.#participantById.get(this.#translationFocusId);
   }
 }
 

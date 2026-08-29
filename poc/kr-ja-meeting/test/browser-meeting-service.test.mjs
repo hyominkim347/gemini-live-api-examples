@@ -18,11 +18,69 @@ function createService(overrides = {}) {
       async stop(utterance) {
         bridgeEvents.push({ type: "stop", ...utterance });
       },
+      async handoff(participant, transition) {
+        bridgeEvents.push({ type: "stop", utteranceId: transition.previousUtteranceId, observedAt: transition.observedAt });
+        bridgeEvents.push({ type: "start", participantId: participant.id, utteranceId: transition.utteranceId, observedAt: transition.observedAt });
+      },
     },
     ...overrides,
   });
   return { service, bridgeEvents };
 }
+
+test("overlapping speech stays published while one translation focus hands off", async () => {
+  let participantSequence = 0;
+  let utteranceSequence = 0;
+  let now = 0;
+  const { service, bridgeEvents } = createService({
+    participantIdFactory: () => `participant-${++participantSequence}`,
+    utteranceIdFactory: () => `utterance-${++utteranceSequence}`,
+    clock: () => now,
+    minimumFocusHoldMilliseconds: 500,
+    overlapWarningMilliseconds: 1_000,
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(first.id, true);
+  await service.mic(second.id, true);
+
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: now });
+  now = 100;
+  const overlap = await service.speechActivity({
+    participantId: second.id,
+    type: "speech-start",
+    observedAt: now,
+  });
+
+  assert.deepEqual(overlap.speakingParticipantIds, [first.id, second.id]);
+  assert.equal(overlap.translationFocusId, first.id);
+  assert.equal(overlap.participants.find(({ id }) => id === second.id).speech, "speaking");
+  assert.deepEqual(bridgeEvents.map(({ type, participantId }) => ({ type, participantId })), [
+    { type: "start", participantId: first.id },
+  ]);
+
+  now = 1_100;
+  const warned = service.snapshot();
+  assert.equal(warned.overlap.detected, true);
+  assert.match(warned.overlap.message, /통역이 불완전/);
+  assert.deepEqual(warned.speakingParticipantIds, [first.id, second.id]);
+
+  now = 1_200;
+  const handedOff = await service.speechActivity({
+    participantId: first.id,
+    type: "speech-end",
+    observedAt: now,
+  });
+  assert.equal(handedOff.translationFocusId, second.id);
+  assert.equal(handedOff.activeUtteranceId, "utterance-2");
+  assert.equal(handedOff.participants.find(({ id }) => id === first.id).speech, "silent");
+  assert.equal(handedOff.participants.find(({ id }) => id === second.id).speech, "speaking");
+  assert.deepEqual(bridgeEvents, [
+    { type: "start", participantId: first.id, utteranceId: "utterance-1", observedAt: 0 },
+    { type: "stop", utteranceId: "utterance-1", observedAt: 1_200 },
+    { type: "start", participantId: second.id, utteranceId: "utterance-2", observedAt: 1_200 },
+  ]);
+});
 
 test("dynamic participant joins with a generated id and can leave", async () => {
   const { service } = createService();
