@@ -7,8 +7,8 @@
 * { box-sizing: border-box; }
 html { min-width: 320px; background: var(--bg); }
 body { min-height: 100vh; margin: 0; color: var(--text); font-family: Inter, Pretendard, "Noto Sans KR", ui-sans-serif, system-ui, sans-serif; background: radial-gradient(circle at 34% 18%, #1c2940 0, transparent 34%), var(--bg); }
-button, a, input { font: inherit; } button { color: inherit; }
-button:focus-visible, a:focus-visible, input:focus-visible + * { outline: 2px solid var(--blue); outline-offset: 3px; }
+button, a, input, select { font: inherit; } button { color: inherit; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 button:disabled { cursor: not-allowed; opacity: .4; }
 #audio-output { position: fixed; width: 1px; height: 1px; overflow: hidden; opacity: .01; pointer-events: none; }
 .concept-label { color: var(--blue); font: 750 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; }
@@ -23,6 +23,15 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .join-card > p { max-width: 560px; margin: 0 0 30px; color: #abb4c4; font-size: 14px; line-height: 1.7; }
 .participant-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0; padding: 0; border: 0; }
 .participant-picker legend { grid-column: 1 / -1; margin-bottom: 9px; color: #cbd3df; font-size: 12px; font-weight: 750; }
+.join-fields { display: grid; gap: 14px; }
+.join-fields > label { display: grid; gap: 8px; color: #cbd3df; font-size: 12px; font-weight: 750; }
+.join-fields > label input { min-height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: 13px; color: var(--text); background: rgb(255 255 255 / 3%); }
+.language-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0; padding: 0; border: 0; }
+.language-picker legend { grid-column: 1 / -1; margin-bottom: 1px; color: #cbd3df; font-size: 12px; font-weight: 750; }
+.pick-language { position: relative; display: grid; gap: 3px; padding: 12px; border: 1px solid var(--line); border-radius: 15px; background: rgb(255 255 255 / 2%); cursor: pointer; }
+.pick-language input { position: absolute; opacity: 0; }
+.pick-language small { color: var(--muted); font-size: 10px; }
+.pick-language.is-selected { border-color: rgb(106 164 255 / 60%); background: rgb(106 164 255 / 9%); box-shadow: 0 0 0 3px rgb(106 164 255 / 8%); }
 .pick-person { position: relative; display: flex; align-items: center; gap: 11px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 15px; background: rgb(255 255 255 / 2%); cursor: pointer; transition: .18s ease; }
 .pick-person:hover { border-color: #4d5a70; transform: translateY(-1px); }
 .pick-person.is-selected { border-color: rgb(106 164 255 / 60%); background: rgb(106 164 255 / 9%); box-shadow: 0 0 0 3px rgb(106 164 255 / 8%); }

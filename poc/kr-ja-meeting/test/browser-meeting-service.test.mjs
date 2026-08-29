@@ -3,149 +3,163 @@ import test from "node:test";
 
 import { BrowserMeetingService } from "../src/browser-meeting-service.mjs";
 
-const participants = [
-  { id: "ko-1", name: "민준", language: "ko" },
-  { id: "ko-2", name: "서연", language: "ko" },
-  { id: "ja-1", name: "Yuki", language: "ja" },
-  { id: "ja-2", name: "Sora", language: "ja" },
-];
-
-test("fixed roster receives scoped join credentials", async () => {
-  const issued = [];
-  const service = new BrowserMeetingService({
-    participants,
-    roomName: "browser-poc",
-    livekitUrl: "ws://127.0.0.1:7880",
-    tokenIssuer: async (participant) => {
-      issued.push(participant.id);
-      return `token:${participant.id}`;
-    },
-    translationBridge: { start: async () => {}, stop: async () => {}, phraseBoundary: async () => {} },
-  });
-
-  assert.deepEqual(await service.join("ko-1"), {
-    livekitUrl: "ws://127.0.0.1:7880",
-    roomName: "browser-poc",
-    token: "token:ko-1",
-    participant: participants[0],
-  });
-  assert.deepEqual(issued, ["ko-1"]);
-  await assert.rejects(service.join("someone-else"), /unknown participant/);
-});
-
-test("shared actions expose exactly one planned listener track", async () => {
+function createService(overrides = {}) {
   const bridgeEvents = [];
   const service = new BrowserMeetingService({
-    participants,
     roomName: "browser-poc",
     livekitUrl: "ws://127.0.0.1:7880",
-    tokenIssuer: async () => "token",
+    participantIdFactory: () => "participant-1",
+    utteranceIdFactory: () => "utterance-1",
+    tokenIssuer: async (participant) => `token:${participant.id}`,
     translationBridge: {
-      async start(participant) { bridgeEvents.push(`start:${participant.id}`); },
-      async stop() { bridgeEvents.push("stop"); },
-      async phraseBoundary() { bridgeEvents.push("boundary"); },
+      async start(participant, utterance) {
+        bridgeEvents.push({ type: "start", participantId: participant.id, ...utterance });
+      },
+      async stop(utterance) {
+        bridgeEvents.push({ type: "stop", ...utterance });
+      },
     },
+    ...overrides,
   });
+  return { service, bridgeEvents };
+}
 
-  let state = await service.action("ja-1", "start-speaking");
-  assert.equal(state.activeSpeakerId, "ja-1");
-  assert.equal(state.participants.find(({ id }) => id === "ko-1").audio.trackId, "translation:ko");
-  assert.equal(state.participants.find(({ id }) => id === "ja-2").audio.trackId, "original:ja-1");
+test("dynamic participant joins with a generated id and can leave", async () => {
+  const { service } = createService();
 
-  state = await service.action("ko-1", "hold-original");
-  assert.equal(state.participants.find(({ id }) => id === "ko-1").audio.trackId, "original:ja-1");
-  state = await service.action("ko-1", "release-original");
-  assert.equal(state.participants.find(({ id }) => id === "ko-1").audio.mode, "original-until-boundary");
-  state = await service.action("ja-1", "phrase-boundary");
-  assert.equal(state.participants.find(({ id }) => id === "ko-1").audio.trackId, "translation:ko");
-  state = await service.action("ja-1", "stop-speaking");
+  assert.deepEqual(await service.join({ name: "  Yuki  ", language: "ja" }), {
+    livekitUrl: "ws://127.0.0.1:7880",
+    roomName: "browser-poc",
+    token: "token:participant-1",
+    participant: { id: "participant-1", name: "Yuki", language: "ja" },
+  });
+  assert.deepEqual(service.snapshot().participants.map(({ id }) => id), ["participant-1"]);
+
+  await service.leave("participant-1");
+  assert.deepEqual(service.snapshot().participants, []);
+  await assert.rejects(service.mic("participant-1", true), /unknown participant/);
+});
+
+test("microphone on remains unmuted and silent until speech activity starts", async () => {
+  const { service, bridgeEvents } = createService();
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+
+  const state = await service.mic(participant.id, true);
+
+  assert.deepEqual(state.participants.find(({ id }) => id === participant.id), {
+    ...participant,
+    microphone: "unmuted",
+    speech: "silent",
+    utteranceId: null,
+    audio: { original: false, translation: false, trackId: null, mode: "silent" },
+  });
   assert.equal(state.activeSpeakerId, null);
-  assert.deepEqual(bridgeEvents, ["start:ja-1", "boundary", "stop"]);
-
-  await assert.rejects(service.action("ko-1", "invented-action"), /unsupported meeting action/);
+  assert.equal(state.activeUtteranceId, null);
+  assert.deepEqual(bridgeEvents, []);
 });
 
-test("only the active speaker can end or segment the active translation", async () => {
-  const bridgeEvents = [];
-  const service = new BrowserMeetingService({
-    participants,
-    roomName: "browser-poc",
-    livekitUrl: "ws://127.0.0.1:7880",
-    tokenIssuer: async () => "token",
-    translationBridge: {
-      async start(participant) { bridgeEvents.push(`start:${participant.id}`); },
-      async stop() { bridgeEvents.push("stop"); },
-      async phraseBoundary() { bridgeEvents.push("boundary"); },
-    },
+test("speech start and end drive one translation lifecycle with one utterance id", async () => {
+  const { service, bridgeEvents } = createService();
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+  await service.mic(participant.id, true);
+
+  const speaking = await service.speechActivity({
+    participantId: participant.id,
+    type: "speech-start",
+    observedAt: 100,
   });
+  assert.equal(speaking.activeSpeakerId, participant.id);
+  assert.equal(speaking.activeUtteranceId, "utterance-1");
+  assert.equal(speaking.participants[0].speech, "speaking");
 
-  await service.action("ja-1", "start-speaking");
-  await assert.rejects(
-    service.action("ko-1", "stop-speaking"),
-    /ko-1 is not the active speaker/,
-  );
-  await assert.rejects(
-    service.action("ko-1", "phrase-boundary"),
-    /ko-1 is not the active speaker/,
-  );
-  assert.equal(service.snapshot().activeSpeakerId, "ja-1");
-  assert.deepEqual(bridgeEvents, ["start:ja-1"]);
-});
-
-test("concurrent starts from the same speaker create one bridge", async () => {
-  const started = deferredForTest();
-  let bridgeStarts = 0;
-  const service = new BrowserMeetingService({
-    participants,
-    roomName: "browser-poc",
-    livekitUrl: "ws://127.0.0.1:7880",
-    tokenIssuer: async () => "token",
-    translationBridge: {
-      async start() { bridgeStarts += 1; await started.promise; },
-      async stop() {},
-      async phraseBoundary() {},
-    },
+  const silent = await service.speechActivity({
+    participantId: participant.id,
+    type: "speech-end",
+    observedAt: 350,
   });
-
-  const first = service.action("ja-1", "start-speaking");
-  const second = service.action("ja-1", "start-speaking");
-  const stop = service.action("ja-1", "stop-speaking");
-  started.resolve();
-  assert.equal((await first).activeSpeakerId, "ja-1");
-  assert.equal((await second).activeSpeakerId, "ja-1");
-  assert.equal((await stop).activeSpeakerId, null);
-  assert.equal(bridgeStarts, 1);
-  assert.equal(service.snapshot().activeSpeakerId, null);
+  assert.equal(silent.activeSpeakerId, null);
+  assert.equal(silent.activeUtteranceId, null);
+  assert.equal(silent.participants[0].speech, "silent");
+  assert.deepEqual(bridgeEvents, [
+    { type: "start", participantId: participant.id, utteranceId: "utterance-1", observedAt: 100 },
+    { type: "stop", utteranceId: "utterance-1", observedAt: 350 },
+  ]);
 });
 
-test("bridge failures cannot leave the meeting session active", async () => {
-  let stopFails = true;
-  const service = new BrowserMeetingService({
-    participants,
-    roomName: "browser-poc",
-    livekitUrl: "ws://127.0.0.1:7880",
-    tokenIssuer: async () => "token",
+test("mic off and leave close an active automatic utterance", async () => {
+  let nextParticipant = 0;
+  let nextUtterance = 0;
+  const { service, bridgeEvents } = createService({
+    participantIdFactory: () => `participant-${++nextParticipant}`,
+    utteranceIdFactory: () => `utterance-${++nextUtterance}`,
+  });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  const second = (await service.join({ name: "민준", language: "ko" })).participant;
+
+  await service.mic(first.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 10 });
+  let state = await service.mic(first.id, false);
+  assert.equal(state.participants.find(({ id }) => id === first.id).microphone, "muted");
+  assert.equal(state.activeSpeakerId, null);
+
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 20 });
+  state = await service.leave(second.id);
+  assert.equal(state.participants.some(({ id }) => id === second.id), false);
+  assert.equal(state.activeSpeakerId, null);
+  assert.deepEqual(bridgeEvents.map(({ type, utteranceId }) => ({ type, utteranceId })), [
+    { type: "start", utteranceId: "utterance-1" },
+    { type: "stop", utteranceId: "utterance-1" },
+    { type: "start", utteranceId: "utterance-2" },
+    { type: "stop", utteranceId: "utterance-2" },
+  ]);
+});
+
+test("bridge cleanup failures cannot leave a ghost participant or open microphone", async () => {
+  let nextParticipant = 0;
+  const { service } = createService({
+    participantIdFactory: () => `participant-${++nextParticipant}`,
     translationBridge: {
       async start() {},
-      async stop() {
-        if (stopFails) throw new Error("cleanup failed");
-      },
-      async phraseBoundary() { throw new Error("boundary failed"); },
+      async stop() { throw new Error("bridge cleanup failed"); },
     },
   });
+  const first = (await service.join({ name: "Yuki", language: "ja" })).participant;
+  await service.mic(first.id, true);
+  await service.speechActivity({ participantId: first.id, type: "speech-start", observedAt: 10 });
 
-  await service.action("ja-1", "start-speaking");
-  await assert.rejects(service.action("ja-1", "stop-speaking"), /cleanup failed/);
+  await assert.rejects(service.mic(first.id, false), /bridge cleanup failed/);
+  assert.equal(service.snapshot().participants[0].microphone, "muted");
   assert.equal(service.snapshot().activeSpeakerId, null);
 
-  stopFails = false;
-  await service.action("ja-1", "start-speaking");
-  await assert.rejects(service.action("ja-1", "phrase-boundary"), /boundary failed/);
-  assert.equal(service.snapshot().activeSpeakerId, null);
+  const second = (await service.join({ name: "민준", language: "ko" })).participant;
+  await service.mic(second.id, true);
+  await service.speechActivity({ participantId: second.id, type: "speech-start", observedAt: 20 });
+  await assert.rejects(service.leave(second.id), /bridge cleanup failed/);
+  assert.equal(service.snapshot().participants.some(({ id }) => id === second.id), false);
 });
 
-function deferredForTest() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
-  return { promise, resolve };
-}
+test("manual speech actions are not part of the service contract", async () => {
+  const { service } = createService();
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+
+  for (const action of ["start-speaking", "stop-speaking", "phrase-boundary"]) {
+    await assert.rejects(service.action(participant.id, action), /unsupported meeting action/);
+  }
+});
+
+test("invalid join and speech activity fail closed", async () => {
+  const { service } = createService();
+  await assert.rejects(service.join({ name: "", language: "ja" }), /display name/);
+  await assert.rejects(service.join({ name: "Yuki", language: "en" }), /unsupported language/);
+
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+  await assert.rejects(
+    service.speechActivity({ participantId: participant.id, type: "speech-start", observedAt: 1 }),
+    /microphone is muted/,
+  );
+  await assert.rejects(
+    service.speechActivity({ participantId: participant.id, type: "invented", observedAt: 1 }),
+    /unsupported speech activity/,
+  );
+});

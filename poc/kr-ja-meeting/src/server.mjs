@@ -20,13 +20,6 @@ const livekitApiSecret = process.env.LIVEKIT_API_SECRET ?? "secret";
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const roomName = process.env.MEETING_ROOM ?? "kr-ja-browser-poc";
 
-const participants = [
-  { id: "ko-1", name: "민준", team: "한국팀", language: "ko", initials: "민" },
-  { id: "ko-2", name: "서연", team: "한국팀", language: "ko", initials: "서" },
-  { id: "ja-1", name: "Yuki", team: "日本チーム", language: "ja", initials: "Y" },
-  { id: "ja-2", name: "Sora", team: "日本チーム", language: "ja", initials: "S" },
-];
-
 if (!geminiApiKey) {
   throw new Error("GEMINI_API_KEY is required to start the live browser meeting");
 }
@@ -55,7 +48,6 @@ const translationBridge = new LiveTranslationBridge({
   },
 });
 const service = new BrowserMeetingService({
-  participants,
   roomName,
   livekitUrl,
   tokenIssuer: (participant) => tokenFor(participant.id, participant.name, true),

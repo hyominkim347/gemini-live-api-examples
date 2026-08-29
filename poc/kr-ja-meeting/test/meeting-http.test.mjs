@@ -17,84 +17,92 @@ async function withServer(service, run) {
   }
 }
 
-test("fixed participant can join and drive the shared meeting state over HTTP", async () => {
-  const actions = [];
+async function post(baseUrl, path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+test("dynamic join, mic, speech, and leave payloads reach the service", async () => {
+  const calls = [];
   const service = {
-    async join(participantId) {
-      if (participantId !== "ko-1") throw new Error("unknown participant: bad-id");
+    async join(input) {
+      calls.push(["join", input]);
       return {
         livekitUrl: "ws://127.0.0.1:7880",
         roomName: "browser-poc",
         token: "opaque-token",
-        participant: { id: "ko-1", language: "ko" },
+        participant: { id: "participant-1", ...input },
       };
     },
-    action(participantId, action) {
-      actions.push({ participantId, action });
-      return { activeSpeakerId: participantId };
+    mic(participantId, enabled) {
+      calls.push(["mic", participantId, enabled]);
+      return { microphone: enabled ? "unmuted" : "muted" };
+    },
+    speechActivity(event) {
+      calls.push(["speech", event]);
+      return { activeUtteranceId: "utterance-1" };
+    },
+    leave(participantId) {
+      calls.push(["leave", participantId]);
+      return { participants: [] };
+    },
+    action() {
+      throw new Error("unsupported meeting action: start-speaking");
     },
     snapshot() {
-      return { activeSpeakerId: null, participants: [] };
+      return { activeSpeakerId: null, activeUtteranceId: null, participants: [] };
     },
   };
 
   await withServer(service, async (baseUrl) => {
-    const joined = await fetch(`${baseUrl}/api/meeting/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ participantId: "ko-1" }),
-    });
+    const joined = await post(baseUrl, "/api/meeting/join", { name: "Yuki", language: "ja" });
     assert.equal(joined.status, 200);
-    assert.deepEqual(await joined.json(), {
-      livekitUrl: "ws://127.0.0.1:7880",
-      roomName: "browser-poc",
-      token: "opaque-token",
-      participant: { id: "ko-1", language: "ko" },
-    });
+    assert.equal(joined.body.participant.id, "participant-1");
 
-    const acted = await fetch(`${baseUrl}/api/meeting/action`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ participantId: "ko-1", action: "start-speaking" }),
-    });
-    assert.equal(acted.status, 200);
-    assert.deepEqual(await acted.json(), { activeSpeakerId: "ko-1" });
-    assert.deepEqual(actions, [{ participantId: "ko-1", action: "start-speaking" }]);
+    assert.deepEqual(await post(baseUrl, "/api/meeting/mic", {
+      participantId: "participant-1",
+      enabled: true,
+    }), { status: 200, body: { microphone: "unmuted" } });
 
-    const state = await fetch(`${baseUrl}/api/meeting`);
-    assert.equal(state.status, 200);
-    assert.deepEqual(await state.json(), { activeSpeakerId: null, participants: [] });
+    assert.deepEqual(await post(baseUrl, "/api/meeting/speech", {
+      participantId: "participant-1",
+      type: "speech-start",
+      observedAt: 100,
+    }), { status: 200, body: { activeUtteranceId: "utterance-1" } });
+
+    assert.deepEqual(await post(baseUrl, "/api/meeting/leave", {
+      participantId: "participant-1",
+    }), { status: 200, body: { participants: [] } });
+
+    const removed = await post(baseUrl, "/api/meeting/action", {
+      participantId: "participant-1",
+      action: "start-speaking",
+    });
+    assert.equal(removed.status, 400);
+    assert.match(removed.body.error, /unsupported meeting action/);
+
+    assert.deepEqual(calls, [
+      ["join", { name: "Yuki", language: "ja" }],
+      ["mic", "participant-1", true],
+      ["speech", { participantId: "participant-1", type: "speech-start", observedAt: 100 }],
+      ["leave", "participant-1"],
+    ]);
   });
 });
 
-test("unknown participant and malformed JSON fail closed", async () => {
-  const service = {
-    async join() {
-      throw new Error("unknown participant: bad-id");
-    },
-    action() {
-      throw new Error("unreachable");
-    },
-    snapshot() {
-      return {};
-    },
-  };
-
+test("malformed JSON fails closed", async () => {
+  const service = { snapshot() { return {}; } };
   await withServer(service, async (baseUrl) => {
-    const unknown = await fetch(`${baseUrl}/api/meeting/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ participantId: "bad-id" }),
-    });
-    assert.equal(unknown.status, 400);
-    assert.deepEqual(await unknown.json(), { error: "unknown participant: bad-id" });
-
-    const malformed = await fetch(`${baseUrl}/api/meeting/join`, {
+    const response = await fetch(`${baseUrl}/api/meeting/join`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "not-json",
     });
-    assert.equal(malformed.status, 400);
-    assert.deepEqual(await malformed.json(), { error: "invalid JSON body" });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "invalid JSON body" });
   });
 });
