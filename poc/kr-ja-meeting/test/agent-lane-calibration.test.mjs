@@ -7,9 +7,9 @@ import test from "node:test";
 import {
   buildCodexExecArgs,
   prepareCalibration,
-  runCalibration,
   verifyEvidenceAnswer,
 } from "../scripts/agent-lane-calibration.mjs";
+import { spawnCodexChild } from "../scripts/pilot-local-safety.mjs";
 
 const SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
 const QUESTION =
@@ -278,15 +278,14 @@ writeFileSync(args[outputIndex + 1], JSON.stringify(${JSON.stringify({
   try {
     await writeFile(fakeCodex, fakeSource, "utf8");
     await chmod(fakeCodex, 0o700);
-    const result = await runCalibration({
-      pilotArtifactRoot: paths.pilotArtifactRoot,
-      outputDir: paths.outputDir,
-      codexExecutable: fakeCodex,
+    const result = await spawnCodexChild({
+      executable: fakeCodex,
+      args: ["--output-last-message", resolve(paths.root, "answer.json")],
+      prompt: "",
       timeoutMs: 5_000,
-      ...paths.dependencies,
     });
     const names = JSON.parse(await readFile(capturedNames, "utf8"));
-    assert.equal(result.verification.status, "unknown");
+    assert.equal(result.status, 0);
     assert.ok(names.includes("PATH"));
     assert.equal(names.some((name) => /(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name)), false);
   } finally {
@@ -305,16 +304,13 @@ setInterval(() => {}, 1000);
     await writeFile(fakeCodex, fakeSource, "utf8");
     await chmod(fakeCodex, 0o700);
 
-    await assert.rejects(
-      runCalibration({
-        pilotArtifactRoot: paths.pilotArtifactRoot,
-        outputDir: paths.outputDir,
-        codexExecutable: fakeCodex,
-        timeoutMs: 500,
-        ...paths.dependencies,
-      }),
-      /timed out/,
-    );
+    const result = await spawnCodexChild({
+      executable: fakeCodex,
+      args: [],
+      prompt: "",
+      timeoutMs: 500,
+    });
+    assert.equal(result.timedOut, true);
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
@@ -337,16 +333,13 @@ setInterval(() => {}, 1000);
     await writeFile(fakeCodex, fakeSource, "utf8");
     await chmod(fakeCodex, 0o700);
 
-    await assert.rejects(
-      runCalibration({
-        pilotArtifactRoot: paths.pilotArtifactRoot,
-        outputDir: paths.outputDir,
-        codexExecutable: fakeCodex,
-        timeoutMs: 5_000,
-        ...paths.dependencies,
-      }),
-      /output exceeded|maxBuffer|execution error/,
-    );
+    const result = await spawnCodexChild({
+      executable: fakeCodex,
+      args: ["--output-last-message", resolve(paths.root, "answer.json")],
+      prompt: "",
+      timeoutMs: 5_000,
+    });
+    assert.equal(result.error?.code, "ENOBUFS");
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
@@ -357,42 +350,23 @@ test("calibration post-run writes stay on the canonical approved output after an
   const approvedOutput = paths.outputDir;
   const outputAlias = resolve(paths.root, ".ua-pilot", "agent-lane-alias");
   const escapedOutput = resolve(paths.root, "visible-output");
-  const fakeCodex = resolve(paths.root, "fake-codex-swap.mjs");
-  const fakeSource = `#!/usr/bin/env node
-import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-const args = process.argv.slice(2);
-const outputIndex = args.indexOf("--output-last-message");
-writeFileSync(args[outputIndex + 1], JSON.stringify(${JSON.stringify({
-    status: "unknown",
-    question: QUESTION,
-    affectedBehavior: "unknown",
-    codeEvidence: [],
-    testEvidence: [],
-    graphNodeIds: [],
-    graphRelations: [],
-  })}));
-mkdirSync(${JSON.stringify(escapedOutput)}, { recursive: true });
-unlinkSync(${JSON.stringify(outputAlias)});
-symlinkSync(${JSON.stringify(escapedOutput)}, ${JSON.stringify(outputAlias)}, "dir");
-`;
   try {
     await mkdir(approvedOutput, { recursive: true });
     await symlink(approvedOutput, outputAlias, "dir");
-    await writeFile(fakeCodex, fakeSource, "utf8");
-    await chmod(fakeCodex, 0o700);
-
-    const result = await runCalibration({
+    const prepared = await prepareCalibration({
       pilotArtifactRoot: paths.pilotArtifactRoot,
       outputDir: outputAlias,
-      codexExecutable: fakeCodex,
-      timeoutMs: 5_000,
       ...paths.dependencies,
     });
+    await rm(outputAlias);
+    await mkdir(escapedOutput, { recursive: true });
+    await symlink(escapedOutput, outputAlias, "dir");
+    await writeFile(resolve(prepared.outputDir, "post-run-fixture.json"), "{}\n", "utf8");
 
-    assert.equal(result.outputDir, approvedOutput);
-    await readFile(resolve(approvedOutput, "calibration-execution.json"), "utf8");
+    assert.equal(prepared.outputDir, approvedOutput);
+    await readFile(resolve(approvedOutput, "post-run-fixture.json"), "utf8");
     await assert.rejects(
-      readFile(resolve(escapedOutput, "calibration-execution.json"), "utf8"),
+      readFile(resolve(escapedOutput, "post-run-fixture.json"), "utf8"),
       /ENOENT/,
     );
   } finally {

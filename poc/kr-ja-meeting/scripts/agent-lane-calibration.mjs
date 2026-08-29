@@ -18,7 +18,8 @@ import {
   createIsolatedMaterialRoot,
   initializeEmptyPilotOutput,
   requireApprovedPilotOutput,
-  spawnCodexChild,
+  resolveTrustedCodexIdentity,
+  spawnTrustedCodexChild,
 } from "./pilot-local-safety.mjs";
 
 const PROVIDER = "current-codex-provider-only";
@@ -364,11 +365,11 @@ export async function verifyEvidenceAnswer({
 export async function runCalibration({
   pilotArtifactRoot,
   outputDir,
-  codexExecutable = "codex",
   timeoutMs = DEFAULT_TIMEOUT_MS,
   loadPilotInputs = loadCurrentPilotArtifact,
   createMaterialRoot = () => createIsolatedMaterialRoot("ua-calibration-material-"),
 }) {
+  const codexIdentity = await resolveTrustedCodexIdentity();
   const prepared = await prepareCalibration({
     pilotArtifactRoot,
     outputDir,
@@ -385,8 +386,8 @@ export async function runCalibration({
   });
   const startedAt = new Date().toISOString();
   const start = performance.now();
-  const result = await spawnCodexChild({
-    executable: codexExecutable,
+  const result = await spawnTrustedCodexChild({
+    identity: codexIdentity,
     args,
     prompt,
     timeoutMs,
@@ -399,6 +400,8 @@ export async function runCalibration({
     await writeFile(executionPath, `${JSON.stringify({
       status: result.timedOut ? "timed-out" : "failed",
       provider: PROVIDER,
+      codexExecutableSha256: codexIdentity.codexSha256,
+      codexPackageVersion: codexIdentity.packageVersion,
       freshContext: true,
       startedAt,
       finishedAt,
@@ -438,6 +441,8 @@ export async function runCalibration({
     writeFile(executionPath, `${JSON.stringify({
       status: "completed",
       provider: PROVIDER,
+      codexExecutableSha256: codexIdentity.codexSha256,
+      codexPackageVersion: codexIdentity.packageVersion,
       freshContext: true,
       invocation: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       startedAt,

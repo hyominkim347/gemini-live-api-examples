@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
@@ -12,8 +12,10 @@ import {
   prepareAgentComparison,
   validateComparisonPlanControls,
   validateComparisonPlanSeal,
+  validateCurrentComparisonMaterials,
   verifyRawAnswer,
 } from "../scripts/agent-lane-comparison.mjs";
+import { digestMaterialRoot } from "../scripts/pilot-local-safety.mjs";
 
 const SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
 
@@ -123,6 +125,13 @@ test("prepared comparison controls reject a changed run path and plan bytes", as
       understandAnythingGraph: "e".repeat(64),
       repositorySearchRg: "f".repeat(64),
     },
+    materialPolicy: {
+      understandAnythingGraph: "sanitized-knowledge-graph-only",
+      repositorySearchRg: "analysis-corpus-only-rg-discovery",
+      benchmarkAnswersIncluded: false,
+      evaluatorIncluded: false,
+      previousAnswersIncluded: false,
+    },
     questions,
     runs: buildCrossedRuns(questions, 600_000),
   };
@@ -136,16 +145,126 @@ test("prepared comparison controls reject a changed run path and plan bytes", as
 
   const planText = `${JSON.stringify(plan, null, 2)}\n`;
   const schemaText = "{}\n";
+  const trustedAnchorSha256 = sha256("frozen comparison inputs");
   const sealText = JSON.stringify({
     contractVersion: 1,
     planSha256: sha256(planText),
     schemaSha256: sha256(schemaText),
+    trustedAnchorSha256,
   });
-  validateComparisonPlanSeal({ planText, sealText, schemaText });
+  validateComparisonPlanSeal({ planText, sealText, schemaText, trustedAnchorSha256 });
   assert.throws(
-    () => validateComparisonPlanSeal({ planText: `${planText} `, sealText, schemaText }),
+    () => validateComparisonPlanSeal({
+      planText: `${planText} `,
+      sealText,
+      schemaText,
+      trustedAnchorSha256,
+    }),
     /changed after prepare/,
   );
+});
+
+test("SELF_CONSISTENT_TAMPER_ACCEPTED is rejected by the frozen comparison anchor", async () => {
+  const benchmarkText = await readFile(
+    new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
+    "utf8",
+  );
+  const benchmark = JSON.parse(benchmarkText);
+  const questions = benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
+  const trustedAnchorSha256 = sha256("trusted frozen pilot and material bytes");
+  const tamperedPlan = {
+    contractVersion: 1,
+    scored: false,
+    lane: "agent",
+    provider: "current-codex-provider-only",
+    analysisSnapshot: SNAPSHOT,
+    benchmarkRevision: benchmark.revision,
+    benchmarkFrozenAt: benchmark.frozenAt,
+    benchmarkSha256: sha256(benchmarkText),
+    preparedAt: "2026-08-30T00:00:00.000Z",
+    timeoutMs: 600_000,
+    orderPolicy: "odd-graph-first-even-rg-first",
+    pilotArtifact: {
+      planSha256: "a".repeat(64),
+      manifestSha256: "b".repeat(64),
+      corpusDigestSha256: "c".repeat(64),
+      graphSha256: "d".repeat(64),
+    },
+    materialDigests: {
+      understandAnythingGraph: sha256("graph plus injected answer key"),
+      repositorySearchRg: "f".repeat(64),
+    },
+    materialPolicy: {
+      understandAnythingGraph: "sanitized-knowledge-graph-only",
+      repositorySearchRg: "analysis-corpus-only-rg-discovery",
+      benchmarkAnswersIncluded: true,
+      evaluatorIncluded: false,
+      previousAnswersIncluded: false,
+    },
+    questions,
+    runs: buildCrossedRuns(questions, 600_000),
+  };
+  const planText = `${JSON.stringify(tamperedPlan, null, 2)}\n`;
+  const schemaText = "{}\n";
+  const attackerAnchor = sha256("attacker-controlled material bytes");
+  const sealText = JSON.stringify({
+    contractVersion: 1,
+    planSha256: sha256(planText),
+    schemaSha256: sha256(schemaText),
+    trustedAnchorSha256: attackerAnchor,
+  });
+
+  assert.throws(
+    () => validateComparisonPlanSeal({
+      planText,
+      sealText,
+      schemaText,
+      trustedAnchorSha256,
+    }),
+    /trusted|anchor|changed after prepare/i,
+  );
+  assert.throws(
+    () => validateComparisonPlanControls({ plan: tamperedPlan, benchmark, benchmarkText }),
+    /answer|material|invalid/i,
+  );
+});
+
+test("answer-key injection is rejected even when the mutable plan digest is updated", async () => {
+  const root = await mkdtemp(resolve(homedir(), ".ua-pilot", "ua-material-anchor-"));
+  const graph = resolve(root, "graph");
+  const rg = resolve(root, "rg");
+  try {
+    await mkdir(graph);
+    await mkdir(rg);
+    await writeFile(resolve(graph, "knowledge-graph.json"), "{}\n", "utf8");
+    await writeFile(resolve(rg, "app.mjs"), "export const app = true;\n", "utf8");
+    const anchoredMaterialDigests = {
+      understandAnythingGraph: await digestMaterialRoot(graph),
+      repositorySearchRg: await digestMaterialRoot(rg),
+    };
+    await writeFile(resolve(graph, "answer-key.json"), "{\"expectedAnswer\":true}\n", "utf8");
+    const selfConsistentMutablePlan = {
+      materialRoots: {
+        root,
+        understandAnythingGraph: graph,
+        repositorySearchRg: rg,
+      },
+      materialDigests: {
+        understandAnythingGraph: await digestMaterialRoot(graph),
+        repositorySearchRg: await digestMaterialRoot(rg),
+      },
+    };
+
+    await assert.rejects(
+      validateCurrentComparisonMaterials(
+        selfConsistentMutablePlan,
+        anchoredMaterialDigests,
+      ),
+      /injected|changed/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("each arm prompt contains only its question and material contract", () => {

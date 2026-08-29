@@ -14,6 +14,15 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 export const CODEX_MATERIAL_PROFILE = "ua_pilot_material_only";
+export const FROZEN_CODEX_EXECUTABLE_SHA256 =
+  "98491713ffb196061003ee148636e743997cc31d76144ba7c53462269896891d";
+const FROZEN_CODEX_ENTRY_SHA256 =
+  "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477";
+const FROZEN_CODEX_PACKAGE_SHA256 =
+  "350fc14f5e912071a6725c6ce00904da87e67e1145d43296c8beffb2349c1be6";
+const FROZEN_CODEX_NATIVE_PACKAGE_SHA256 =
+  "6cc1c61958cf5bc9eb8130e521beef3eb8ab4db0ecb98da939a6f5994b55412b";
+const FROZEN_CODEX_PACKAGE_VERSION = "0.151.0";
 
 const CODEX_CHILD_ENV_KEYS = [
   "CODEX_HOME",
@@ -273,6 +282,112 @@ export function buildCodexChildEnv(source = process.env) {
   return environment;
 }
 
+async function trustedExecutableIdentity({ codexPackageRoot }) {
+  if (process.platform !== "darwin" || process.arch !== "arm64") {
+    throw new Error("Frozen current-provider Codex executable requires macOS arm64");
+  }
+  const codexEntrypoint = resolve(codexPackageRoot, "bin/codex.js");
+  const packageJson = resolve(codexPackageRoot, "package.json");
+  const nativePackageRoot = resolve(
+    codexPackageRoot,
+    "node_modules/@openai/codex-darwin-arm64",
+  );
+  const nativePackageJson = resolve(nativePackageRoot, "package.json");
+  const codexExecutable = resolve(
+    nativePackageRoot,
+    "vendor/aarch64-apple-darwin/bin/codex",
+  );
+  const [canonicalExecutable, canonicalCodex, canonicalPackage, canonicalNativePackage] =
+    await Promise.all([
+      realpath(codexExecutable),
+    realpath(codexEntrypoint),
+    realpath(packageJson),
+      realpath(nativePackageJson),
+    ]);
+  await Promise.all([
+    regularFile(canonicalExecutable, "trusted Codex executable"),
+    regularFile(canonicalCodex, "trusted Codex entrypoint"),
+    regularFile(canonicalPackage, "trusted Codex package metadata"),
+    regularFile(canonicalNativePackage, "trusted Codex native package metadata"),
+  ]);
+  const [executableBytes, entrypointBytes, packageBytes, nativePackageBytes] =
+    await Promise.all([
+      readFile(canonicalExecutable),
+      readFile(canonicalCodex),
+    readFile(canonicalPackage),
+      readFile(canonicalNativePackage),
+    ]);
+  const packageMetadata = JSON.parse(packageBytes.toString("utf8"));
+  const nativePackageMetadata = JSON.parse(nativePackageBytes.toString("utf8"));
+  const identity = {
+    codexExecutable: canonicalExecutable,
+    codexSha256: sha256(executableBytes),
+    codexEntrypoint: canonicalCodex,
+    entrypointSha256: sha256(entrypointBytes),
+    packageJson: canonicalPackage,
+    packageSha256: sha256(packageBytes),
+    nativePackageJson: canonicalNativePackage,
+    nativePackageSha256: sha256(nativePackageBytes),
+    packageName: packageMetadata.name,
+    packageVersion: packageMetadata.version,
+    nativePackageName: nativePackageMetadata.name,
+    nativePackageVersion: nativePackageMetadata.version,
+  };
+  if (
+    identity.codexSha256 !== FROZEN_CODEX_EXECUTABLE_SHA256 ||
+    identity.entrypointSha256 !== FROZEN_CODEX_ENTRY_SHA256 ||
+    identity.packageSha256 !== FROZEN_CODEX_PACKAGE_SHA256 ||
+    identity.nativePackageSha256 !== FROZEN_CODEX_NATIVE_PACKAGE_SHA256 ||
+    identity.packageName !== "@openai/codex" ||
+    identity.packageVersion !== FROZEN_CODEX_PACKAGE_VERSION ||
+    identity.nativePackageName !== "@openai/codex" ||
+    identity.nativePackageVersion !== `${FROZEN_CODEX_PACKAGE_VERSION}-darwin-arm64` ||
+    packageMetadata.bin?.codex !== "bin/codex.js"
+  ) {
+    throw new Error("Codex executable does not match the frozen current-provider identity");
+  }
+  return identity;
+}
+
+export async function resolveTrustedCodexIdentity({ environment = process.env } = {}) {
+  const candidates = [];
+  if (environment.NVM_BIN) {
+    candidates.push(resolve(
+      environment.NVM_BIN,
+      "../lib/node_modules/@openai/codex",
+    ));
+  }
+  candidates.push(resolve(
+    dirname(process.execPath),
+    "../lib/node_modules/@openai/codex",
+  ));
+  const failures = [];
+  for (const codexPackageRoot of new Set(candidates)) {
+    try {
+      return await trustedExecutableIdentity({ codexPackageRoot });
+    } catch (error) {
+      failures.push(error.message);
+    }
+  }
+  throw new Error(
+    `Trusted current-provider Codex executable is unavailable: ${failures.join("; ")}`,
+  );
+}
+
+export async function assertTrustedCodexIdentity(identity) {
+  if (!identity?.packageJson) {
+    throw new Error("Trusted Codex executable identity is missing");
+  }
+  const codexPackageRoot = dirname(identity.packageJson);
+  const current = await trustedExecutableIdentity({
+    codexPackageRoot,
+  });
+  if (JSON.stringify(current) !== JSON.stringify(identity)) {
+    throw new Error("Trusted Codex executable identity or digest changed before execution");
+  }
+  return current;
+}
+
 function signalProcessGroup(child, signal) {
   if (child.pid && process.platform !== "win32") {
     try {
@@ -287,6 +402,18 @@ function signalProcessGroup(child, signal) {
     child.kill(signal);
   } catch (error) {
     if (error.code !== "ESRCH") throw error;
+  }
+}
+
+function processGroupAlive(child) {
+  if (!child.pid || process.platform === "win32") return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    if (error.code === "EPERM") return true;
+    throw error;
   }
 }
 
@@ -395,6 +522,20 @@ export function runProcessGroupWithTimeout({
         beginTermination();
       }
     };
+    const handleLeaderExit = (status, signal) => {
+      closeResult ??= { status, signal };
+      try {
+        if (processGroupAlive(child)) {
+          beginTermination();
+        } else {
+          forceKillComplete = true;
+        }
+      } catch (error) {
+        processError ??= error;
+        beginTermination();
+      }
+      finishIfReady();
+    };
 
     if (output === "capture") {
       child.stdout.on("data", capture(stdout));
@@ -405,8 +546,9 @@ export function runProcessGroupWithTimeout({
       if (!child.pid) forceKillComplete = true;
       finishIfReady();
     });
+    child.once("exit", handleLeaderExit);
     child.once("close", (status, signal) => {
-      closeResult = { status, signal };
+      if (!closeResult) handleLeaderExit(status, signal);
       finishIfReady();
     });
 
@@ -437,6 +579,23 @@ export function spawnCodexChild({
     killGraceMilliseconds,
     output: "capture",
     maxBuffer: 32 * 1024 * 1024,
+  });
+}
+
+export async function spawnTrustedCodexChild({
+  identity,
+  args,
+  prompt,
+  timeoutMs,
+  killGraceMilliseconds = 250,
+}) {
+  const trusted = await assertTrustedCodexIdentity(identity);
+  return spawnCodexChild({
+    executable: trusted.codexExecutable,
+    args,
+    prompt,
+    timeoutMs,
+    killGraceMilliseconds,
   });
 }
 

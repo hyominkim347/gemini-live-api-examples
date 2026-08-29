@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -16,18 +17,22 @@ import {
   copyRegularFileWithin,
   createIsolatedMaterialRoot,
   digestMaterialRoot,
+  FROZEN_CODEX_EXECUTABLE_SHA256,
   initializeEmptyPilotOutput,
   readRegularPilotFile,
   requireApprovedPilotOutput,
   requirePilotChildDirectory,
+  resolveTrustedCodexIdentity,
   resolvePilotChildPath,
-  spawnCodexChild,
+  spawnTrustedCodexChild,
   validateIsolatedMaterialLayout,
 } from "./pilot-local-safety.mjs";
 
 const PROVIDER = "current-codex-provider-only";
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const FROZEN_BENCHMARK_SHA256 = "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6";
+const FROZEN_GRAPH_MATERIAL_SHA256 = "0c499a161d962abd7a86432478c560cd235c6e34e1c052ece37164a4bf86cac9";
+const FROZEN_RG_MATERIAL_SHA256 = "e3548c305a7d5f48bc34f0f4a1598a321585e9f94a338a91b9161743a2d01dbe";
 const DEFAULT_BENCHMARK_PATH = fileURLToPath(
   new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
 );
@@ -118,6 +123,56 @@ function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
+function answerSchemaText() {
+  return `${JSON.stringify(ANSWER_SCHEMA, null, 2)}\n`;
+}
+
+async function trustedMaterialDigests(inputs) {
+  const graphDigest = sha256(`knowledge-graph.json\0${inputs.graphSha256}`);
+  const corpusRows = [];
+  for (const { path } of [...inputs.manifest.included].sort((left, right) =>
+    left.path.localeCompare(right.path))) {
+    const blob = spawnSync(
+      "git",
+      ["-C", inputs.sourceRepository, "show", `${ANALYSIS_SNAPSHOT}:${path}`],
+      { encoding: null, maxBuffer: 64 * 1024 * 1024 },
+    );
+    if (blob.status !== 0) {
+      throw new Error(`Cannot read frozen Analysis Corpus blob: ${path}`);
+    }
+    corpusRows.push(`${path}\0${sha256(blob.stdout)}`);
+  }
+  const materialDigests = {
+    understandAnythingGraph: graphDigest,
+    repositorySearchRg: sha256(corpusRows.join("\n")),
+  };
+  if (
+    materialDigests.understandAnythingGraph !== FROZEN_GRAPH_MATERIAL_SHA256 ||
+    materialDigests.repositorySearchRg !== FROZEN_RG_MATERIAL_SHA256
+  ) {
+    throw new Error("Pilot inputs differ from the frozen Agent comparison material anchor");
+  }
+  return materialDigests;
+}
+
+function trustedComparisonAnchorSha256({ pilotArtifact, materialDigests }) {
+  return sha256(JSON.stringify({
+    revision: "agent-comparison-trusted-anchor-v1",
+    analysisSnapshot: ANALYSIS_SNAPSHOT,
+    benchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    schemaSha256: sha256(answerSchemaText()),
+    pilotArtifact,
+    materialDigests,
+    materialPolicy: {
+      understandAnythingGraph: "sanitized-knowledge-graph-only",
+      repositorySearchRg: "analysis-corpus-only-rg-discovery",
+      benchmarkAnswersIncluded: false,
+      evaluatorIncluded: false,
+      previousAnswersIncluded: false,
+    },
+  }));
+}
+
 function relationKey(relation) {
   return `${relation.source}\u0000${relation.type}\u0000${relation.target}`;
 }
@@ -154,14 +209,21 @@ function sanitizedQuestions(benchmark) {
   return benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
 }
 
-export function validateComparisonPlanSeal({ planText, sealText, schemaText }) {
+export function validateComparisonPlanSeal({
+  planText,
+  sealText,
+  schemaText,
+  trustedAnchorSha256,
+}) {
   const seal = JSON.parse(sealText);
   if (
     seal.contractVersion !== 1 ||
     seal.planSha256 !== sha256(planText) ||
-    seal.schemaSha256 !== sha256(schemaText)
+    seal.schemaSha256 !== sha256(schemaText) ||
+    !/^[a-f0-9]{64}$/.test(trustedAnchorSha256 ?? "") ||
+    seal.trustedAnchorSha256 !== trustedAnchorSha256
   ) {
-    throw new Error("Raw comparison plan or schema changed after prepare");
+    throw new Error("Raw comparison plan, schema, or trusted anchor changed after prepare");
   }
   return JSON.parse(planText);
 }
@@ -189,6 +251,11 @@ export function validateComparisonPlanControls({ plan, benchmark, benchmarkText 
     !Number.isFinite(Date.parse(plan.preparedAt)) ||
     hashFields.length !== 6 ||
     hashFields.some((value) => !/^[a-f0-9]{64}$/.test(value)) ||
+    plan.materialPolicy?.understandAnythingGraph !== "sanitized-knowledge-graph-only" ||
+    plan.materialPolicy?.repositorySearchRg !== "analysis-corpus-only-rg-discovery" ||
+    plan.materialPolicy?.benchmarkAnswersIncluded !== false ||
+    plan.materialPolicy?.evaluatorIncluded !== false ||
+    plan.materialPolicy?.previousAnswersIncluded !== false ||
     JSON.stringify(plan.questions) !== JSON.stringify(expectedQuestions) ||
     JSON.stringify(plan.runs) !== JSON.stringify(expectedRuns)
   ) {
@@ -325,6 +392,20 @@ export async function prepareAgentComparison({
     }),
   ]);
   const questions = sanitizedQuestions(benchmark);
+  const pilotArtifact = {
+    planSha256: inputs.planSha256,
+    manifestSha256: inputs.manifestSha256,
+    corpusDigestSha256: inputs.corpusDigestSha256,
+    graphSha256: inputs.graphSha256,
+  };
+  const anchoredMaterialDigests = await trustedMaterialDigests(inputs);
+  const actualMaterialDigests = {
+    understandAnythingGraph: await digestMaterialRoot(graphMaterialRoot),
+    repositorySearchRg: await digestMaterialRoot(rgMaterialRoot),
+  };
+  if (JSON.stringify(actualMaterialDigests) !== JSON.stringify(anchoredMaterialDigests)) {
+    throw new Error("Prepared Agent comparison material differs from frozen Pilot inputs");
+  }
   const plan = {
     contractVersion: 1,
     scored: false,
@@ -342,21 +423,13 @@ export async function prepareAgentComparison({
       mechanism: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       resumeOrForkAllowed: false,
     },
-    pilotArtifact: {
-      planSha256: inputs.planSha256,
-      manifestSha256: inputs.manifestSha256,
-      corpusDigestSha256: inputs.corpusDigestSha256,
-      graphSha256: inputs.graphSha256,
-    },
+    pilotArtifact,
     materialRoots: {
       root: materialsRoot,
       understandAnythingGraph: graphMaterialRoot,
       repositorySearchRg: rgMaterialRoot,
     },
-    materialDigests: {
-      understandAnythingGraph: await digestMaterialRoot(graphMaterialRoot),
-      repositorySearchRg: await digestMaterialRoot(rgMaterialRoot),
-    },
+    materialDigests: anchoredMaterialDigests,
     materialPolicy: {
       understandAnythingGraph: "sanitized-knowledge-graph-only",
       repositorySearchRg: "analysis-corpus-only-rg-discovery",
@@ -368,11 +441,16 @@ export async function prepareAgentComparison({
     runs: buildCrossedRuns(questions, timeoutMs),
   };
   const planText = `${JSON.stringify(plan, null, 2)}\n`;
-  const schemaText = `${JSON.stringify(ANSWER_SCHEMA, null, 2)}\n`;
+  const schemaText = answerSchemaText();
+  const trustedAnchorSha256 = trustedComparisonAnchorSha256({
+    pilotArtifact,
+    materialDigests: anchoredMaterialDigests,
+  });
   const sealText = `${JSON.stringify({
     contractVersion: 1,
     planSha256: sha256(planText),
     schemaSha256: sha256(schemaText),
+    trustedAnchorSha256,
   }, null, 2)}\n`;
   await Promise.all([
     writeFile(planPath, planText, "utf8"),
@@ -510,40 +588,63 @@ export async function verifyRawAnswer({
   };
 }
 
-async function loadComparison(outputDir) {
+async function loadComparison(outputDir, pilotArtifactRoot) {
   const resultRoot = await requireApprovedPilotOutput(
     outputDir,
     "Agent Lane Paired Comparison output",
   );
-  const [planFile, sealFile, schemaFile, benchmarkText] = await Promise.all([
+  const [planFile, sealFile, schemaFile, benchmarkText, currentInputs] = await Promise.all([
     readRegularPilotFile(resultRoot, "raw-comparison-plan.json", "raw comparison plan"),
     readRegularPilotFile(resultRoot, "raw-comparison-seal.json", "raw comparison seal"),
     readRegularPilotFile(resultRoot, "raw-answer.schema.json", "raw answer schema"),
     readFile(DEFAULT_BENCHMARK_PATH, "utf8"),
+    loadCurrentPilotArtifact(pilotArtifactRoot),
   ]);
+  const anchoredMaterialDigests = await trustedMaterialDigests(currentInputs);
+  const trustedAnchorSha256 = trustedComparisonAnchorSha256({
+    pilotArtifact: {
+      planSha256: currentInputs.planSha256,
+      manifestSha256: currentInputs.manifestSha256,
+      corpusDigestSha256: currentInputs.corpusDigestSha256,
+      graphSha256: currentInputs.graphSha256,
+    },
+    materialDigests: anchoredMaterialDigests,
+  });
   const plan = validateComparisonPlanSeal({
     planText: planFile.text,
     sealText: sealFile.text,
     schemaText: schemaFile.text,
+    trustedAnchorSha256,
   });
+  if (schemaFile.text !== answerSchemaText()) {
+    throw new Error("Raw answer schema differs from the frozen comparison schema");
+  }
   if (sha256(benchmarkText) !== FROZEN_BENCHMARK_SHA256) {
     throw new Error("Frozen Impact Benchmark content changed");
   }
   const benchmark = JSON.parse(benchmarkText);
   validateComparisonPlanControls({ plan, benchmark, benchmarkText });
+  requireCurrentPilotBinding(plan.pilotArtifact, currentInputs);
+  if (JSON.stringify(plan.materialDigests) !== JSON.stringify(anchoredMaterialDigests)) {
+    throw new Error("Agent comparison material seal is not anchored to frozen Pilot inputs");
+  }
   for (const run of plan.runs) {
     resolvePilotChildPath(resultRoot, `runs/${run.runId}`, "Agent comparison run path");
   }
-  const materialRoots = await validateCurrentMaterials(plan);
+  const materialRoots = await validateCurrentComparisonMaterials(
+    plan,
+    anchoredMaterialDigests,
+  );
   return {
     resultRoot,
     plan,
     materialRoots,
     schemaPath: schemaFile.path,
+    currentInputs,
   };
 }
 
-async function validateCurrentMaterials(plan) {
+export async function validateCurrentComparisonMaterials(plan, anchoredMaterialDigests) {
   const materialLayout = await validateIsolatedMaterialLayout({
     root: plan.materialRoots?.root,
     children: {
@@ -561,10 +662,10 @@ async function validateCurrentMaterials(plan) {
   };
   if (
     currentMaterialDigests.understandAnythingGraph !==
-      plan.materialDigests?.understandAnythingGraph ||
-    currentMaterialDigests.repositorySearchRg !== plan.materialDigests?.repositorySearchRg
+      anchoredMaterialDigests?.understandAnythingGraph ||
+    currentMaterialDigests.repositorySearchRg !== anchoredMaterialDigests?.repositorySearchRg
   ) {
-    throw new Error("Agent comparison material changed after prepare");
+    throw new Error("Agent comparison material changed or contains injected content");
   }
   return materialLayout.children;
 }
@@ -581,11 +682,16 @@ function requireCurrentPilotBinding(binding, currentInputs) {
 }
 
 async function requireCurrentComparisonState({ pilotArtifactRoot, plan }) {
-  const [currentInputs, materialRoots] = await Promise.all([
-    loadCurrentPilotArtifact(pilotArtifactRoot),
-    validateCurrentMaterials(plan),
-  ]);
+  const currentInputs = await loadCurrentPilotArtifact(pilotArtifactRoot);
+  const anchoredMaterialDigests = await trustedMaterialDigests(currentInputs);
+  const materialRoots = await validateCurrentComparisonMaterials(
+    plan,
+    anchoredMaterialDigests,
+  );
   requireCurrentPilotBinding(plan.pilotArtifact, currentInputs);
+  if (JSON.stringify(plan.materialDigests) !== JSON.stringify(anchoredMaterialDigests)) {
+    throw new Error("Agent comparison material seal is not anchored to frozen Pilot inputs");
+  }
   return { currentInputs, materialRoots };
 }
 
@@ -623,6 +729,8 @@ async function materializeRawResult({
   const answer = JSON.parse(answerFile.text);
   if (
     execution.provider !== PROVIDER ||
+    execution.codexExecutableSha256 !== FROZEN_CODEX_EXECUTABLE_SHA256 ||
+    execution.codexPackageVersion !== "0.151.0" ||
     execution.freshContext !== true ||
     execution.timeoutMs !== plan.timeoutMs ||
     execution.timedOut !== false ||
@@ -646,9 +754,9 @@ async function materializeRawResult({
 export async function runAgentComparison({
   pilotArtifactRoot,
   outputDir,
-  codexExecutable = "codex",
 }) {
-  const { resultRoot, plan, schemaPath } = await loadComparison(outputDir);
+  const codexIdentity = await resolveTrustedCodexIdentity();
+  const { resultRoot, plan, schemaPath } = await loadComparison(outputDir, pilotArtifactRoot);
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
   for (const run of plan.runs) {
@@ -688,8 +796,8 @@ export async function runAgentComparison({
     process.stdout.write(`${JSON.stringify({ event: "run-started", runId: run.runId, sequence: run.sequence, arm: run.arm })}\n`);
     const startedAt = new Date().toISOString();
     const start = performance.now();
-    const launched = await spawnCodexChild({
-      executable: codexExecutable,
+    const launched = await spawnTrustedCodexChild({
+      identity: codexIdentity,
       args,
       prompt,
       timeoutMs: run.timeoutMs,
@@ -698,6 +806,8 @@ export async function runAgentComparison({
     const finishedAt = new Date().toISOString();
     const execution = {
       provider: PROVIDER,
+      codexExecutableSha256: codexIdentity.codexSha256,
+      codexPackageVersion: codexIdentity.packageVersion,
       freshContext: true,
       invocation: "codex exec --ephemeral --ignore-user-config with material-only filesystem permissions",
       timeoutMs: run.timeoutMs,
@@ -736,7 +846,7 @@ export async function runAgentComparison({
 }
 
 export async function verifyAgentComparison({ pilotArtifactRoot, outputDir }) {
-  const { resultRoot, plan } = await loadComparison(outputDir);
+  const { resultRoot, plan } = await loadComparison(outputDir, pilotArtifactRoot);
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
   for (const run of plan.runs) {

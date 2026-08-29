@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   CODEX_MATERIAL_PROFILE,
   assertIsolatedMaterialRoot,
+  assertTrustedCodexIdentity,
   buildCodexChildEnv,
   buildCodexPermissionConfig,
   copyTrackedCorpus,
@@ -16,6 +17,7 @@ import {
   loadVerifiedPilotArtifact,
   requireApprovedPilotOutput,
   requirePosixProcessGroups,
+  resolveTrustedCodexIdentity,
   requirePilotChildDirectory,
   spawnCodexChild,
 } from "../scripts/pilot-local-safety.mjs";
@@ -156,6 +158,26 @@ test("Codex child environment is an allowlist with no provider or secret variabl
   });
 });
 
+test("trusted Codex identity ignores a fake caller PATH binary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-fake-codex-path-"));
+  const fakeCodex = join(root, "codex");
+  try {
+    await writeFile(fakeCodex, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const identity = await resolveTrustedCodexIdentity({
+      environment: { ...process.env, PATH: root },
+    });
+    assert.notEqual(identity.codexExecutable, fakeCodex);
+    assert.match(identity.codexSha256, /^[a-f0-9]{64}$/);
+    assert.match(identity.entrypointSha256, /^[a-f0-9]{64}$/);
+    await assert.rejects(
+      assertTrustedCodexIdentity({ ...identity, codexSha256: "0".repeat(64) }),
+      /identity|digest|changed/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("process-group timeouts fail closed on Windows", () => {
   assert.throws(
     () => requirePosixProcessGroups("win32"),
@@ -196,6 +218,41 @@ test("Codex timeout kills the child process group before a descendant side effec
     await assert.rejects(access(marker), { code: "ENOENT" });
     assert.equal(result.timedOut, true);
     assert.equal(result.status, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex success cleans a background descendant before returning", {
+  skip: process.platform === "win32" ? "POSIX process groups are required" : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-codex-success-cleanup-"));
+  const marker = join(root, "background-descendant-survived.txt");
+  const descendantProgram = [
+    "const { writeFileSync } = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 400);`,
+  ].join("");
+  const leaderProgram = [
+    "const { spawn } = require('node:child_process');",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantProgram)}], { stdio: 'inherit' });`,
+    "child.unref();",
+    "process.exit(0);",
+  ].join("");
+
+  try {
+    const result = await spawnCodexChild({
+      executable: process.execPath,
+      args: ["-e", leaderProgram],
+      prompt: "",
+      timeoutMs: 1_000,
+      killGraceMilliseconds: 50,
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 450));
+
+    assert.equal(result.status, 0);
+    assert.equal(result.timedOut, false);
+    await assert.rejects(access(marker), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
