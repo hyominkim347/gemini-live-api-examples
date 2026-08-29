@@ -22,6 +22,8 @@ export class GeminiLiveTranslateSocket {
   #automaticActivityDetection;
   #socket = null;
   #setupComplete = false;
+  #resumptionRetryUsed = false;
+  #resumptionRetryPending = false;
 
   constructor({
     apiKey,
@@ -64,12 +66,19 @@ export class GeminiLiveTranslateSocket {
     if (this.#socket) {
       throw new Error("Gemini socket is already connected");
     }
+    this.#resumptionRetryUsed = false;
+    this.#resumptionRetryPending = false;
+    return this.#connectSocket();
+  }
+
+  #connectSocket() {
     const url = `${GEMINI_LIVE_URL}?key=${encodeURIComponent(this.#apiKey)}`;
     const socket = this.#socketFactory(url);
     this.#socket = socket;
+    let resumptionHandle = null;
     this.#listen(socket, "open", () => {
       if (this.#socket !== socket) return;
-      const resumptionHandle = this.#handleStore.get(
+      resumptionHandle = this.#handleStore.get(
         this.#meetingId,
         this.#targetLanguage,
       );
@@ -89,10 +98,33 @@ export class GeminiLiveTranslateSocket {
     this.#listen(socket, "error", (error) => {
       if (this.#socket === socket) this.#onError(error);
     });
-    this.#listen(socket, "close", () => {
+    this.#listen(socket, "close", (code, reason) => {
       if (this.#socket !== socket) return;
+      const setupComplete = this.#setupComplete;
       this.#socket = null;
       this.#setupComplete = false;
+      if (
+        !setupComplete &&
+        resumptionHandle &&
+        !this.#resumptionRetryUsed &&
+        isMissingResumptionSession(code, reason)
+      ) {
+        this.#resumptionRetryUsed = true;
+        this.#resumptionRetryPending = true;
+        this.#handleStore.delete(this.#meetingId, this.#targetLanguage);
+        this.#recordResumptionRetry("started");
+        this.#connectSocket();
+        return;
+      }
+      if (!setupComplete && this.#resumptionRetryPending) {
+        this.#resumptionRetryPending = false;
+        this.#recordResumptionRetry(
+          "failed",
+          isMissingResumptionSession(code, reason)
+            ? "session-not-found"
+            : "setup-closed",
+        );
+      }
       this.#onClose();
     });
     return socket;
@@ -169,6 +201,10 @@ export class GeminiLiveTranslateSocket {
     if (Object.keys(serverEvent).length > 0) this.#onServerEvent(serverEvent);
     if (message.setupComplete) {
       this.#setupComplete = true;
+      if (this.#resumptionRetryPending) {
+        this.#resumptionRetryPending = false;
+        this.#recordResumptionRetry("succeeded");
+      }
       this.#onSetupComplete();
     }
 
@@ -200,9 +236,11 @@ export class GeminiLiveTranslateSocket {
       socket.on(event, handler);
       return;
     }
-    socket.addEventListener(event, (message) =>
-      handler(event === "message" ? message.data : message),
-    );
+    socket.addEventListener(event, (message) => {
+      if (event === "message") return handler(message.data);
+      if (event === "close") return handler(message.code, message.reason);
+      return handler(message);
+    });
   }
 
   #sendRealtimeSignal(name) {
@@ -216,4 +254,25 @@ export class GeminiLiveTranslateSocket {
     this.#socket.send(JSON.stringify({ realtimeInput: { [name]: {} } }));
     return true;
   }
+
+  #recordResumptionRetry(outcome, errorCode) {
+    try {
+      this.#onServerEvent({
+        type: "resumption-retry",
+        outcome,
+        meetingId: this.#meetingId,
+        targetLanguage: this.#targetLanguage,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch {
+      // Diagnostics must not control session recovery.
+    }
+  }
+}
+
+function isMissingResumptionSession(code, reason) {
+  return (
+    code === 1008 &&
+    String(reason ?? "").includes("BidiGenerateContent session not found")
+  );
 }
