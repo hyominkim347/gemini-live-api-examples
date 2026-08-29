@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { lstat, mkdir, readFile, readdir, readlink, realpath, stat, writeFile } from "node:fs/promises";
-import { basename, relative, resolve, sep } from "node:path";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
@@ -831,11 +831,27 @@ async function prepareCommand(args) {
     options["artifact-root"] ?? resolve(repo, ".ua-pilot"),
     "Understand-Anything prepare output",
   );
+  if (await pathExists(artifactRoot)) {
+    throw new Error(
+      "prepare requires a new Pilot Artifact root; existing Pilot Artifact and retained " +
+      "evidence are never overwritten. Choose a new --artifact-root. Cleanup requires " +
+      "separate explicit approval.",
+    );
+  }
   const upstreamSource = options["upstream-source"] ?? UPSTREAM_REPOSITORY;
   const manifest = buildCorpusManifest(repo);
   const plan = buildPilotPlan(repo, artifactRoot);
 
-  await mkdir(artifactRoot, { recursive: true });
+  await mkdir(dirname(artifactRoot), { recursive: true, mode: 0o700 });
+  try {
+    await mkdir(artifactRoot, { mode: 0o700 });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    throw new Error(
+      "prepare requires a new Pilot Artifact root; the requested path appeared before " +
+      "initialization. Choose a new --artifact-root. Cleanup requires separate explicit approval.",
+    );
+  }
   const snapshotHead = await ensurePinnedCheckout({
     source: repo,
     destination: plan.snapshotCheckout,

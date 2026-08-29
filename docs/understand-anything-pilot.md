@@ -74,36 +74,52 @@ AIN-7639는 검토한 upstream source를 감싸는 fail-closed adapter로
 
 adapter는 upstream global installer를 실행하거나 skill symlink 또는 hook을 만들지 않는다.
 ignored `.ua-pilot/` 디렉터리 아래에만 기록한다. `prepare`에는 검토한 로컬 upstream
-checkout 또는 공식 repository URL을 전달한다. 기존 artifact checkout의 HEAD가 pin과
-다르면 덮어쓰지 않는다.
+checkout 또는 공식 repository URL을 전달한다. `prepare`는 새 artifact root만 허용하며,
+기존 root가 비어 있더라도 다시 사용하거나 덮어쓰지 않는다. 재실행은 새 경로를 선택한다.
+기존 artifact cleanup은 별도 명시적 승인이 필요하다.
 
 ```bash
-node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs prepare \
+cd /absolute/path/to/repository/poc/kr-ja-meeting
+
+node scripts/understand-anything-pilot.mjs prepare \
   --repo /absolute/path/to/repository \
   --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run \
   --upstream-source /absolute/path/to/reviewed/Understand-Anything
 ```
 
-생성된 `codex-prompt.md`는 현재 Codex provider와
-`UNDERSTAND_NO_WORKTREE_REDIRECT=1`만 사용해 실행한다. plan은 dependency 설치와 core
-build를 고정된 artifact-local checkout으로 제한한다. prompt는 `--full`,
-`--language ko`, `--no-auto-update`를 고정하며 automatic refresh는 현재 Pilot 범위 밖이다.
+생성된 sealed plan과 prompt는 반드시 budget runner로 실행한다. runner는 현재 Codex
+provider와 `UNDERSTAND_NO_WORKTREE_REDIRECT=1`만 사용하고, dependency 설치와 core build를
+고정된 artifact-local checkout으로 제한한다. full analysis는 `--full`, `--language ko`,
+`--no-auto-update`를 고정한다. Incremental Refresh는 같은 sealed plan의 수동 두 번째
+phase이며 automatic refresh나 background 실행을 허용하지 않는다.
+
+```bash
+npm run pilot:run-budgeted -- \
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run \
+  --phase fullAnalysis
+
+npm run pilot:run-budgeted -- \
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run \
+  --phase incrementalRefresh
+```
 
 upstream scanning 뒤에는 inventory가 정확히 일치해야 한다.
 
 ```bash
-node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs verify-scan \
+node scripts/understand-anything-pilot.mjs verify-scan \
   --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
 ```
 
 `prepare`는 `run-metrics.json`과 `calibration-answer.json`을 `not-run` 상태로
-초기화한다. 관찰한 로컬 근거가 있을 때만 해당 상태를 바꾸고 `verify-artifact`를
-실행한다. graph revision 누락 또는 불일치, fingerprint 누락, corpus drift, graph node로
-확인되지 않는 calibration 근거, 측정되지 않은 실행, time budget 초과가 있으면
-거부한다. corpus 준비나 deterministic scan만으로는 Pilot 통과가 아니다.
+초기화한다. `run-metrics.json`은 위 두 runner만 변경한다. 수동으로 status나 timing을
+작성하면 verifier가 거부한다. `calibration-answer.json`에는 실제 calibration에서 관찰한
+behavior, code/test evidence, graph node만 기록하며 self-report를 실행 증거로 대신하지
+않는다. graph revision 누락 또는 불일치, fingerprint 누락, corpus drift, graph node로
+확인되지 않는 calibration 근거, 측정되지 않은 실행, time budget 초과가 있으면 거부한다.
+corpus 준비나 deterministic scan만으로는 Pilot 통과가 아니다.
 
 ```bash
-node poc/kr-ja-meeting/scripts/understand-anything-pilot.mjs verify-artifact \
+node scripts/understand-anything-pilot.mjs verify-artifact \
   --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
 ```
 
@@ -121,6 +137,7 @@ evidence는 evidence gate에 유리하게 계산하지 않는다. scorer revisio
 질문별 의미 일치와 일치·누락된 동결 code/test evidence를 기록한다.
 
 ```bash
+# 위 graph adapter와 같은 package cwd에서 실행한다.
 npm run pilot:adjudicate-agent -- \
   --raw /absolute/path/to/raw-results.json \
   --output /absolute/path/to/repository/.ua-pilot/agent-only-gate/adjudication.json

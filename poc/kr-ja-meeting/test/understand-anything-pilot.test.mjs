@@ -194,6 +194,39 @@ test("plan pins isolated upstream execution and disables redirect and automation
   }
 });
 
+test("operator docs provide package-cwd commands for every budgeted phase and adjudication", async () => {
+  const [operatorDocs, packageText] = await Promise.all([
+    readFile(join(projectRoot, "docs", "understand-anything-pilot.md"), "utf8"),
+    readFile(join(projectRoot, "poc", "kr-ja-meeting", "package.json"), "utf8"),
+  ]);
+  const packageManifest = JSON.parse(packageText);
+
+  assert.match(
+    operatorDocs,
+    /cd \/absolute\/path\/to\/repository\/poc\/kr-ja-meeting/,
+  );
+  assert.match(
+    operatorDocs,
+    /npm run pilot:run-budgeted --[\s\\]*\n[\s\S]*?--phase fullAnalysis/,
+  );
+  assert.match(
+    operatorDocs,
+    /npm run pilot:run-budgeted --[\s\\]*\n[\s\S]*?--phase incrementalRefresh/,
+  );
+  assert.match(
+    operatorDocs,
+    /npm run pilot:adjudicate-agent --[\s\\]*\n/,
+  );
+  assert.equal(
+    packageManifest.scripts["pilot:run-budgeted"],
+    "node scripts/understand-anything-pilot.mjs run-budgeted",
+  );
+  assert.equal(
+    packageManifest.scripts["pilot:adjudicate-agent"],
+    "node scripts/adjudicate-agent-only-pilot.mjs",
+  );
+});
+
 test("plan canonicalizes a symlinked source repository before sealing it", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-source-alias-"));
   const sourceAlias = join(fixtureRoot, "source-alias");
@@ -561,6 +594,31 @@ test("prepare refuses an upstream source that lacks the reviewed commit", async 
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /ba450c43425f3de6d43daf76526950ad8ca93536/);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("prepare refuses an existing artifact before touching retained evidence", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-prepare-existing-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot", "pilot-run");
+  const metricsPath = join(artifactRoot, "run-metrics.json");
+  const retainedEvidence = '{"fullAnalysis":{"status":"completed","elapsedMilliseconds":123}}\n';
+
+  try {
+    await mkdir(artifactRoot, { recursive: true });
+    await writeFile(metricsPath, retainedEvidence, "utf8");
+
+    const result = runPilot([
+      "prepare",
+      "--repo", projectRoot,
+      "--artifact-root", artifactRoot,
+      "--upstream-source", projectRoot,
+    ]);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /existing Pilot Artifact|new and empty|retained evidence/i);
+    assert.equal(await readFile(metricsPath, "utf8"), retainedEvidence);
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }
