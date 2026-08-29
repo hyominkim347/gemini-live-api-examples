@@ -48,19 +48,120 @@ test("active original track flows through Gemini into the opposite-language trac
   await stop;
 
   assert.deepEqual(calls, [
+    "subscribe:original:ja-1",
     "sink:ko",
     "connect",
     "activity-start",
-    "subscribe:original:ja-1",
     "pcm:16000:0102",
     "translated:0304",
     "activity-end",
     "activity-start",
     "translated:0506",
     "activity-end",
-    "unsubscribe",
     "gemini-close",
+    "unsubscribe",
   ]);
+});
+
+test("one-second pre-roll and the final frame cross one persistent automatic-VAD session", async () => {
+  const sentFrames = [];
+  const signals = [];
+  let originalFrame;
+  let clientCount = 0;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    preRollMilliseconds: 1_000,
+    audioGateway: {
+      async translationSink() { return { async capture() {} }; },
+      async subscribeOriginal(_trackName, onFrame) {
+        originalFrame = onFrame;
+        return { async close() { signals.push("unsubscribe"); } };
+      },
+    },
+    geminiFactory(options) {
+      clientCount += 1;
+      return {
+        connect() { options.onSetupComplete(); },
+        sendActivityStart() { signals.push("activity-start"); return true; },
+        sendActivityEnd() { signals.push("activity-end"); return true; },
+        sendAudioStreamEnd() { signals.push("stream-end"); return true; },
+        sendPcm16(pcm, sampleRate) {
+          sentFrames.push({ marker: pcm.readInt16LE(0), byteLength: pcm.byteLength, sampleRate });
+          return true;
+        },
+        close() { signals.push("close"); },
+      };
+    },
+  });
+  const speaker = { id: "ja-1", language: "ja" };
+
+  await bridge.prepare(speaker);
+  for (let marker = 1; marker <= 12; marker += 1) {
+    const frame = Buffer.alloc(3_200);
+    frame.writeInt16LE(marker);
+    originalFrame(frame, 16_000);
+  }
+
+  await bridge.start(speaker, { utteranceId: "utterance-1" });
+  const liveFrame = Buffer.alloc(3_200);
+  liveFrame.writeInt16LE(13);
+  originalFrame(liveFrame, 16_000);
+  await bridge.phraseBoundary();
+  bridge.resume(speaker, { utteranceId: "utterance-2" });
+  const finalFrame = Buffer.alloc(3_200);
+  finalFrame.writeInt16LE(14);
+  originalFrame(finalFrame, 16_000);
+  await bridge.stop();
+
+  assert.equal(clientCount, 1);
+  assert.deepEqual(sentFrames.map(({ marker }) => marker), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  assert.equal(sentFrames.every(({ byteLength, sampleRate }) => byteLength === 3_200 && sampleRate === 16_000), true);
+  assert.deepEqual(signals, ["stream-end", "close", "unsubscribe"]);
+});
+
+test("automatic VAD keeps the phrase open until the final translated audio is captured", async () => {
+  const calls = [];
+  let originalFrame;
+  let geminiOptions;
+  const bridge = new LiveTranslationBridge({
+    meetingId: "browser-poc",
+    continuousInput: true,
+    firstAudioTimeoutMilliseconds: 100,
+    audioGateway: {
+      async translationSink() {
+        return { async capture(pcm) { calls.push(`capture:${pcm.toString("hex")}`); } };
+      },
+      async subscribeOriginal(_trackName, onFrame) {
+        originalFrame = onFrame;
+        return { async close() {} };
+      },
+    },
+    geminiFactory(options) {
+      geminiOptions = options;
+      return {
+        connect() { options.onSetupComplete(); },
+        sendAudioStreamEnd() { return true; },
+        sendPcm16() { return true; },
+        close() {},
+      };
+    },
+  });
+
+  await bridge.start({ id: "ja-1", language: "ja" }, { utteranceId: "utterance-1" });
+  originalFrame(Buffer.from([0xe8, 0x03]), 16_000);
+  let boundaryResolved = false;
+  const boundary = bridge.phraseBoundary().then(() => { boundaryResolved = true; });
+  await delayForTest(1);
+  assert.equal(boundaryResolved, false);
+
+  await geminiOptions.onTranslatedAudio(Buffer.from([0xd0, 0x07]).toString("base64"));
+  geminiOptions.onGenerationComplete();
+  await boundary;
+  assert.deepEqual(calls, ["capture:d007"]);
+
+  bridge.resume({ id: "ja-1", language: "ja" }, { utteranceId: "utterance-2" });
+  await bridge.abort();
 });
 
 test("stop waits for translated audio playout before closing the bridge", async () => {
@@ -152,7 +253,7 @@ test("a second speaker cannot overlap the active translation bridge", async () =
   await stop;
 });
 
-test("handoff drains and closes the focused bridge before subscribing the next speaker", async () => {
+test("handoff closes the focused session but keeps its mic-on pre-roll subscription", async () => {
   const calls = [];
   const clients = [];
   let originalFrame;
@@ -195,16 +296,15 @@ test("handoff drains and closes the focused bridge before subscribing the next s
   );
 
   assert.deepEqual(calls, [
+    "subscribe:original:ja-1",
     "sink:ko",
     "activity-start",
-    "subscribe:original:ja-1",
     "capture",
     "activity-end",
-    "unsubscribe:original:ja-1",
     "gemini-close",
+    "subscribe:original:ko-1",
     "sink:ja",
     "activity-start",
-    "subscribe:original:ko-1",
   ]);
   assert.equal(clients.length, 2);
   assert.equal(clients[0].options.utteranceId, "utterance-1");
@@ -238,7 +338,7 @@ test("a second start is rejected while Gemini setup is still pending", async () 
 
   const firstStart = bridge.start({ id: "ja-1", language: "ja" });
   const secondStart = bridge.start({ id: "ko-1", language: "ko" });
-  await Promise.resolve();
+  while (setupCallbacks.length === 0) await Promise.resolve();
   for (const completeSetup of setupCallbacks) completeSetup();
   await assert.rejects(
     secondStart,
@@ -406,6 +506,7 @@ test("abort waits for an in-progress start and prevents an orphan bridge", async
   const subscriptionEntered = deferredForBridgeTest();
   const subscription = deferredForBridgeTest();
   let client;
+  let subscriptionClosed = false;
   const bridge = new LiveTranslationBridge({
     meetingId: "browser-poc",
     audioGateway: {
@@ -431,10 +532,11 @@ test("abort waits for an in-progress start and prevents an orphan bridge", async
   const start = bridge.start({ id: "ko-1", language: "ko" });
   await subscriptionEntered.promise;
   const abort = bridge.abort();
-  subscription.resolve({ async close() {} });
+  subscription.resolve({ async close() { subscriptionClosed = true; } });
   await abort;
   await assert.rejects(start, /start was aborted/);
-  assert.equal(client.closed, true);
+  assert.equal(client, undefined);
+  assert.equal(subscriptionClosed, true);
 });
 
 function delayForTest(milliseconds) {

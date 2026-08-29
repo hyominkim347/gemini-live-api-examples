@@ -4,7 +4,10 @@ export class LiveTranslationBridge {
   #geminiFactory;
   #drainQuietMilliseconds;
   #firstAudioTimeoutMilliseconds;
+  #continuousInput;
+  #preRollMilliseconds;
   #eventRecorder;
+  #preparedInputs = new Map();
   #active = null;
   #startingClient = null;
   #startPromise = null;
@@ -16,6 +19,8 @@ export class LiveTranslationBridge {
     geminiFactory,
     drainQuietMilliseconds = 1_500,
     firstAudioTimeoutMilliseconds = 5_000,
+    continuousInput = false,
+    preRollMilliseconds = 1_000,
     eventRecorder = { record() {} },
   }) {
     if (!meetingId || !audioGateway || !geminiFactory) {
@@ -26,10 +31,55 @@ export class LiveTranslationBridge {
     this.#geminiFactory = geminiFactory;
     this.#drainQuietMilliseconds = drainQuietMilliseconds;
     this.#firstAudioTimeoutMilliseconds = firstAudioTimeoutMilliseconds;
+    this.#continuousInput = continuousInput;
+    if (!Number.isFinite(preRollMilliseconds) || preRollMilliseconds <= 0) {
+      throw new Error("preRollMilliseconds must be a positive number");
+    }
+    this.#preRollMilliseconds = preRollMilliseconds;
     if (!eventRecorder || typeof eventRecorder.record !== "function") {
       throw new Error("eventRecorder.record must be a function");
     }
     this.#eventRecorder = eventRecorder;
+  }
+
+  async prepare(speaker) {
+    const existing = this.#preparedInputs.get(speaker.id);
+    if (existing) {
+      if (existing.language !== speaker.language) {
+        throw new Error("prepared speaker language cannot change");
+      }
+      await existing.ready;
+      return;
+    }
+
+    const prepared = createPreparedInput(speaker, this.#preRollMilliseconds);
+    this.#preparedInputs.set(speaker.id, prepared);
+    prepared.ready = this.#audioGateway.subscribeOriginal(
+      `original:${speaker.id}`,
+      (pcm, sampleRate) => prepared.receive(pcm, sampleRate),
+    ).then((subscription) => {
+      prepared.subscription = subscription;
+    });
+    try {
+      await prepared.ready;
+    } catch (error) {
+      if (this.#preparedInputs.get(speaker.id) === prepared) {
+        this.#preparedInputs.delete(speaker.id);
+      }
+      throw error;
+    }
+  }
+
+  async release(participantId) {
+    if (this.#active?.context.participantId === participantId) {
+      throw new Error("cannot release the active translation input");
+    }
+    const prepared = this.#preparedInputs.get(participantId);
+    if (!prepared) return;
+    this.#preparedInputs.delete(participantId);
+    await settle(prepared.ready);
+    await prepared.subscription?.close();
+    prepared.clear();
   }
 
   start(speaker, { utteranceId } = {}) {
@@ -47,7 +97,8 @@ export class LiveTranslationBridge {
   async #startSpeaker(speaker, utteranceId, startRevision) {
     const targetLanguage = speaker.language === "ko" ? "ja" : "ko";
     let gemini;
-    let originalSubscription;
+    const alreadyPrepared = this.#preparedInputs.has(speaker.id);
+    let preparedInput;
     let captureChain = Promise.resolve();
     let lastTranslatedAudioAt = 0;
     let audibleOutputReceived = false;
@@ -68,6 +119,18 @@ export class LiveTranslationBridge {
     };
     this.#record("gemini-setup-started", context, { result: "started" });
     try {
+      this.#record("livekit-subscribe-started", context, { result: "started" });
+      try {
+        await this.prepare(speaker);
+        this.#record("livekit-subscribe-succeeded", context, { result: "succeeded" });
+      } catch (error) {
+        this.#record("livekit-subscribe-failed", context, {
+          result: "failed",
+          errorCode: "original-subscription-failed",
+        });
+        throw error;
+      }
+      preparedInput = this.#preparedInputs.get(speaker.id);
       const sink = await this.#audioGateway.translationSink(targetLanguage);
       this.#throwIfAborted(startRevision);
       const setup = deferred();
@@ -111,16 +174,12 @@ export class LiveTranslationBridge {
       this.#record("gemini-setup-succeeded", context, { result: "succeeded" });
       setupSucceeded = true;
       this.#throwIfAborted(startRevision);
-      if (!gemini.sendActivityStart()) {
+      if (!this.#continuousInput && !gemini.sendActivityStart()) {
         throw new Error("Gemini activityStart was not sent");
       }
       this.#record("gemini-input-started", context, { result: "started" });
 
-      this.#record("livekit-subscribe-started", context, { result: "started" });
-      try {
-        originalSubscription = await this.#audioGateway.subscribeOriginal(
-          `original:${speaker.id}`,
-          (pcm, sampleRate) => {
+      const sendInput = (pcm, sampleRate) => {
           if (!acceptingInput) return;
           if (hasAudiblePcm(pcm)) {
             audibleInputReceived = true;
@@ -132,27 +191,20 @@ export class LiveTranslationBridge {
           if (!gemini.sendPcm16(pcm, sampleRate)) {
             throw new Error("Gemini PCM frame was not sent");
           }
-          },
-        );
-        this.#record("livekit-subscribe-succeeded", context, { result: "succeeded" });
-      } catch (error) {
-        this.#record("livekit-subscribe-failed", context, {
-          result: "failed",
-          errorCode: "original-subscription-failed",
-        });
-        throw error;
-      }
+      };
+      preparedInput.forwardTo(sendInput);
       this.#throwIfAborted(startRevision);
       this.#active = {
         context,
         gemini,
-        originalSubscription,
+        preparedInput,
         capture: () => captureChain,
         waitForPlayout: typeof sink.waitForPlayout === "function"
           ? () => sink.waitForPlayout()
           : async () => {},
         pauseInput() { acceptingInput = false; },
         resumeInput() { acceptingInput = true; },
+        detachInput() { preparedInput.bufferInstead(); },
         resetAudioTurn() {
           audibleInputReceived = false;
           audibleOutputReceived = false;
@@ -189,11 +241,13 @@ export class LiveTranslationBridge {
           errorCode: "setup-failed",
         });
       }
-      if (originalSubscription) {
-        await settle(originalSubscription.close());
+      if (preparedInput) preparedInput.bufferInstead();
+      if (gemini) {
+        if (this.#continuousInput) gemini.sendAudioStreamEnd();
+        else gemini.sendActivityEnd();
       }
-      gemini?.sendActivityEnd();
       gemini?.close();
+      if (!alreadyPrepared) await settle(this.release(speaker.id));
       this.#record("resources-closed", context, { result: "closed" });
       throw error;
     } finally {
@@ -203,6 +257,12 @@ export class LiveTranslationBridge {
 
   async phraseBoundary() {
     const active = this.#requireActive();
+    if (this.#continuousInput) {
+      if (active.hasAudibleInput()) await active.waitForAudioDrain();
+      await active.capture();
+      active.resetAudioTurn();
+      return;
+    }
     active.pauseInput();
     try {
       if (!active.gemini.sendActivityEnd()) {
@@ -222,11 +282,26 @@ export class LiveTranslationBridge {
     }
   }
 
-  async stop() {
+  resume(speaker, { utteranceId } = {}) {
+    const active = this.#requireActive();
+    if (
+      active.context.participantId !== speaker.id
+      || active.context.language !== speaker.language
+    ) {
+      throw new Error("translation bridge can only resume the parked speaker");
+    }
+    active.context.utteranceId = utteranceId;
+    active.resetAudioTurn();
+    this.#record("gemini-input-started", active.context, { result: "resumed" });
+  }
+
+  async stop({ releasePrepared = true } = {}) {
     const active = this.#requireActive();
     active.pauseInput();
-    const sentActivityEnd = active.gemini.sendActivityEnd();
-    const unsubscribe = settle(active.originalSubscription.close());
+    active.detachInput();
+    const sentInputEnd = this.#continuousInput
+      ? active.gemini.sendAudioStreamEnd()
+      : active.gemini.sendActivityEnd();
     const results = [];
     let geminiClosed = false;
     const closeGemini = () => {
@@ -235,16 +310,19 @@ export class LiveTranslationBridge {
       active.gemini.close();
     };
     try {
-      results.push(sentActivityEnd
+      results.push(sentInputEnd
         ? active.hasAudibleInput()
           ? await settle(active.waitForAudioDrain())
           : { status: "fulfilled", value: undefined }
-        : { status: "rejected", reason: new Error("Gemini activityEnd was not sent") });
+        : { status: "rejected", reason: new Error(
+          this.#continuousInput
+            ? "Gemini audioStreamEnd was not sent"
+            : "Gemini activityEnd was not sent",
+        ) });
       active.cancelAudioDrain();
       closeGemini();
       results.push(await settle(active.capture()));
       results.push(await settle(active.waitForPlayout()));
-      results.push(await unsubscribe);
     } finally {
       closeGemini();
       this.#active = null;
@@ -260,12 +338,13 @@ export class LiveTranslationBridge {
       );
       this.#record("resources-closed", active.context, { result: "closed" });
     }
+    if (releasePrepared) results.push(await settle(this.release(active.context.participantId)));
     const failure = results.find(({ status }) => status === "rejected");
     if (failure) throw failure.reason;
   }
 
   async handoff(speaker, { utteranceId } = {}) {
-    await this.stop();
+    await this.stop({ releasePrepared: false });
     try {
       await this.start(speaker, { utteranceId });
     } catch (error) {
@@ -280,7 +359,12 @@ export class LiveTranslationBridge {
     if (this.#startingClient) this.#startingClient.close();
     if (startPromise) await settle(startPromise);
     const result = await settle(this.#abortActive());
+    const releases = await Promise.all(
+      [...this.#preparedInputs.keys()].map((participantId) => settle(this.release(participantId))),
+    );
     if (result.status === "rejected") throw result.reason;
+    const failedRelease = releases.find(({ status }) => status === "rejected");
+    if (failedRelease) throw failedRelease.reason;
   }
 
   async #abortActive() {
@@ -288,17 +372,16 @@ export class LiveTranslationBridge {
     if (!active) return;
     this.#active = null;
     active.pauseInput();
+    active.detachInput();
     active.cancelAudioDrain();
-    const results = await Promise.all([
-      settle(active.originalSubscription.close()),
-      settle(active.capture()),
-    ]);
+    const results = await Promise.all([settle(active.capture())]);
     active.gemini.close();
     this.#record("gemini-output-aborted", active.context, {
       result: "aborted",
       errorCode: "translation-aborted",
     });
     this.#record("resources-closed", active.context, { result: "closed" });
+    results.push(await settle(this.release(active.context.participantId)));
     const failure = results.find(({ status }) => status === "rejected");
     if (failure) throw failure.reason;
   }
@@ -321,6 +404,43 @@ export class LiveTranslationBridge {
       // Observability hooks cannot change translation.
     }
   }
+}
+
+function createPreparedInput(speaker, preRollMilliseconds) {
+  let frames = [];
+  let bufferedMilliseconds = 0;
+  let forward = null;
+
+  return {
+    language: speaker.language,
+    ready: Promise.resolve(),
+    subscription: null,
+    receive(pcm, sampleRate) {
+      if (forward) return forward(pcm, sampleRate);
+      const bytes = Buffer.isBuffer(pcm) ? Buffer.from(pcm) : Buffer.from(pcm);
+      const durationMilliseconds = bytes.byteLength / 2 / sampleRate * 1_000;
+      frames.push({ pcm: bytes, sampleRate, durationMilliseconds });
+      bufferedMilliseconds += durationMilliseconds;
+      while (frames.length > 0 && bufferedMilliseconds > preRollMilliseconds) {
+        bufferedMilliseconds -= frames.shift().durationMilliseconds;
+      }
+    },
+    forwardTo(onFrame) {
+      const buffered = frames;
+      frames = [];
+      bufferedMilliseconds = 0;
+      forward = onFrame;
+      for (const frame of buffered) onFrame(frame.pcm, frame.sampleRate);
+    },
+    bufferInstead() {
+      forward = null;
+    },
+    clear() {
+      frames = [];
+      bufferedMilliseconds = 0;
+      forward = null;
+    },
+  };
 }
 
 async function settle(promise) {

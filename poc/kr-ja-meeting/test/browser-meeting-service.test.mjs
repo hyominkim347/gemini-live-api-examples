@@ -35,16 +35,24 @@ function createService(overrides = {}) {
     utteranceIdFactory: () => "utterance-1",
     tokenIssuer: async (participant) => `token:${participant.id}`,
     translationBridge: {
+      async prepare() {},
       async start(participant, utterance) {
         bridgeEvents.push({ type: "start", participantId: participant.id, ...utterance });
       },
       async stop(utterance) {
         bridgeEvents.push({ type: "stop", ...utterance });
       },
+      async phraseBoundary(utterance) {
+        bridgeEvents.push({ type: "boundary", ...utterance });
+      },
+      async resume(participant, utterance) {
+        bridgeEvents.push({ type: "resume", participantId: participant.id, ...utterance });
+      },
       async handoff(participant, transition) {
         bridgeEvents.push({ type: "stop", utteranceId: transition.previousUtteranceId, observedAt: transition.observedAt });
         bridgeEvents.push({ type: "start", participantId: participant.id, utteranceId: transition.utteranceId, observedAt: transition.observedAt });
       },
+      async release() {},
     },
     ...overrides,
   });
@@ -150,19 +158,23 @@ test("vacated focus waits for a continuing overlap candidate to satisfy minimum 
   assert.equal(waiting.speakingParticipantIds.includes(second.id), true);
   assert.deepEqual(bridgeEvents.map(({ type, participantId }) => ({ type, participantId })), [
     { type: "start", participantId: first.id },
-    { type: "stop", participantId: undefined },
+    { type: "boundary", participantId: undefined },
   ]);
 
   now = 599;
   assert.equal((await service.refresh()).translationFocusId, null);
   now = 600;
   assert.equal((await service.refresh()).translationFocusId, second.id);
-  assert.deepEqual(bridgeEvents.at(-1), {
+  assert.deepEqual(bridgeEvents.slice(-2), [{
+    type: "stop",
+    utteranceId: "utterance-1",
+    observedAt: 600,
+  }, {
     type: "start",
     participantId: second.id,
     utteranceId: "utterance-2",
     observedAt: 600,
-  });
+  }]);
 });
 
 test("a failed pending-focus bridge start stays locked out until that utterance ends", async () => {
@@ -367,7 +379,35 @@ test("speech start and end drive one translation lifecycle with one utterance id
   assert.equal(silent.participants[0].speech, "silent");
   assert.deepEqual(bridgeEvents, [
     { type: "start", participantId: participant.id, utteranceId: "utterance-1", observedAt: 100 },
-    { type: "stop", utteranceId: "utterance-1", observedAt: 350 },
+    { type: "boundary", utteranceId: "utterance-1", observedAt: 350 },
+  ]);
+});
+
+test("same speaker reuses one translation session while the microphone stays on", async () => {
+  let utterance = 0;
+  let now = 100;
+  const { service, bridgeEvents } = createService({
+    utteranceIdFactory: () => `utterance-${++utterance}`,
+    clock: () => now,
+  });
+  const { participant } = await service.join({ name: "Yuki", language: "ja" });
+  await service.mic(participant.id, true);
+
+  await service.speechActivity({ participantId: participant.id, type: "speech-start", observedAt: 100 });
+  now = 200;
+  await service.speechActivity({ participantId: participant.id, type: "speech-end", observedAt: 200 });
+  now = 300;
+  await service.speechActivity({ participantId: participant.id, type: "speech-start", observedAt: 300 });
+  now = 400;
+  await service.speechActivity({ participantId: participant.id, type: "speech-end", observedAt: 400 });
+  await service.mic(participant.id, false);
+
+  assert.deepEqual(bridgeEvents, [
+    { type: "start", participantId: participant.id, utteranceId: "utterance-1", observedAt: 100 },
+    { type: "boundary", utteranceId: "utterance-1", observedAt: 200 },
+    { type: "resume", participantId: participant.id, utteranceId: "utterance-2", observedAt: 300 },
+    { type: "boundary", utteranceId: "utterance-2", observedAt: 400 },
+    { type: "stop" },
   ]);
 });
 
@@ -394,9 +434,11 @@ test("mic off and leave close an active automatic utterance", async () => {
   assert.equal(state.activeSpeakerId, null);
   assert.deepEqual(bridgeEvents.map(({ type, utteranceId }) => ({ type, utteranceId })), [
     { type: "start", utteranceId: "utterance-1" },
-    { type: "stop", utteranceId: "utterance-1" },
+    { type: "boundary", utteranceId: "utterance-1" },
+    { type: "stop", utteranceId: undefined },
     { type: "start", utteranceId: "utterance-2" },
-    { type: "stop", utteranceId: "utterance-2" },
+    { type: "boundary", utteranceId: "utterance-2" },
+    { type: "stop", utteranceId: undefined },
   ]);
 });
 
@@ -507,6 +549,7 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
   handles.set("browser-poc", "ko", "expired-handle");
   const bridge = new LiveTranslationBridge({
     meetingId: "browser-poc",
+    continuousInput: true,
     audioGateway: {
       async translationSink() { return { async capture() {} }; },
       async subscribeOriginal() { return { async close() {} }; },
@@ -522,7 +565,7 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
           return socket;
         },
         openState: FakeSocket.OPEN,
-        automaticActivityDetection: false,
+        automaticActivityDetection: true,
         onServerEvent(event) { retryEvents.push(event); },
       });
     },
@@ -551,11 +594,18 @@ test("automatic speech keeps its utterance id while an expired Gemini session re
     "started",
     "succeeded",
   ]);
+  sockets[1].emit("message", JSON.stringify({
+    serverContent: {
+      modelTurn: { parts: [{ inlineData: { data: Buffer.from([1, 2]).toString("base64") } }] },
+      generationComplete: true,
+    },
+  }));
   await service.speechActivity({
     participantId: participant.id,
     type: "speech-end",
     observedAt: 200,
   });
+  await service.mic(participant.id, false);
 });
 
 test("a second setup failure stops retrying and cleans the automatic speech state", async () => {
@@ -565,9 +615,10 @@ test("a second setup failure stops retrying and cleans the automatic speech stat
   handles.set("browser-poc", "ko", "expired-handle");
   const bridge = new LiveTranslationBridge({
     meetingId: "browser-poc",
+    continuousInput: true,
     audioGateway: {
       async translationSink() { return { async capture() {} }; },
-      async subscribeOriginal() { throw new Error("must not subscribe before setup"); },
+      async subscribeOriginal() { return { async close() {} }; },
     },
     geminiFactory(callbacks) {
       return new GeminiLiveTranslateSocket({
@@ -580,7 +631,7 @@ test("a second setup failure stops retrying and cleans the automatic speech stat
           return socket;
         },
         openState: FakeSocket.OPEN,
-        automaticActivityDetection: false,
+        automaticActivityDetection: true,
         onServerEvent(event) { retryEvents.push(event); },
       });
     },
@@ -609,4 +660,5 @@ test("a second setup failure stops retrying and cleans the automatic speech stat
     "started",
     "failed",
   ]);
+  await service.mic(participant.id, false);
 });

@@ -52,9 +52,10 @@ const translationBridge = new LiveTranslationBridge({
       handleStore: handles,
       socketFactory: (url) => new WebSocket(url),
       openState: WebSocket.OPEN,
-      automaticActivityDetection: false,
+      automaticActivityDetection: true,
     });
   },
+  continuousInput: true,
   eventRecorder,
 });
 const service = new BrowserMeetingService({

@@ -356,10 +356,10 @@ test("Gemini input and output are correlated without claiming browser playout", 
 
   assert.deepEqual(events.map(({ type }) => type), [
     "gemini-setup-started",
-    "gemini-setup-succeeded",
-    "gemini-input-started",
     "livekit-subscribe-started",
     "livekit-subscribe-succeeded",
+    "gemini-setup-succeeded",
+    "gemini-input-started",
     "gemini-input-received",
     "gemini-output-received",
     "livekit-queue-updated",

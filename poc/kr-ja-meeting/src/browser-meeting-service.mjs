@@ -29,6 +29,7 @@ export class BrowserMeetingService {
   #listeningPlanKeyByParticipantId = new Map();
   #issuedPlayoutContextByParticipantId = new Map();
   #translationStartLockouts = new Set();
+  #parkedTranslation = null;
   #actionChain = Promise.resolve();
 
   constructor({
@@ -94,6 +95,7 @@ export class BrowserMeetingService {
         if (this.#session.isSpeaking(participantId)) {
           await this.#endSpeech(participantId, undefined);
         }
+        await this.#releaseParticipantTranslation(participantId);
       } finally {
         this.#session.leave(participantId);
       }
@@ -109,10 +111,14 @@ export class BrowserMeetingService {
     return this.#enqueue(async () => {
       if (typeof enabled !== "boolean") throw new Error("microphone enabled must be a boolean");
       const participant = this.#session.participant(participantId);
+      if (enabled) {
+        await this.#translationBridge.prepare?.(participant);
+      }
       try {
         if (!enabled && this.#session.isSpeaking(participantId)) {
           await this.#endSpeech(participantId, undefined);
         }
+        if (!enabled) await this.#releaseParticipantTranslation(participantId);
       } finally {
         this.#session.setMicrophone(participantId, enabled);
       }
@@ -142,10 +148,30 @@ export class BrowserMeetingService {
         try {
           if (!previousFocusId && focus.translationFocusId) {
             const focusedParticipant = this.#session.participant(focus.translationFocusId);
-            await this.#translationBridge.start(focusedParticipant, {
-              utteranceId: this.#utteranceIdFor(focus.translationFocusId),
-              observedAt: eventAt,
-            });
+            const nextUtteranceId = this.#utteranceIdFor(focus.translationFocusId);
+            if (this.#parkedTranslation) {
+              if (
+                this.#parkedTranslation.participantId === focusedParticipant.id
+                && typeof this.#translationBridge.resume === "function"
+              ) {
+                await this.#translationBridge.resume(focusedParticipant, {
+                  utteranceId: nextUtteranceId,
+                  observedAt: eventAt,
+                });
+              } else {
+                await this.#translationBridge.handoff(focusedParticipant, {
+                  previousUtteranceId: this.#parkedTranslation.utteranceId,
+                  utteranceId: nextUtteranceId,
+                  observedAt: eventAt,
+                });
+              }
+              this.#parkedTranslation = null;
+            } else {
+              await this.#translationBridge.start(focusedParticipant, {
+                utteranceId: nextUtteranceId,
+                observedAt: eventAt,
+              });
+            }
           }
           this.#recordParticipant("speech-started", participant, {
             utteranceId,
@@ -202,7 +228,16 @@ export class BrowserMeetingService {
           return this.snapshot();
         }
         try {
-          await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
+          if (this.#parkedTranslation) {
+            await this.#translationBridge.handoff(participant, {
+              previousUtteranceId: this.#parkedTranslation.utteranceId,
+              utteranceId,
+              observedAt: eventAt,
+            });
+            this.#parkedTranslation = null;
+          } else {
+            await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
+          }
           this.#translationStartLockouts.delete(lockoutKey);
           this.#session.setTranslationFocus(participant.id);
           this.#recordFocusTransition(beforeFocus, focus, participant, utteranceId);
@@ -310,9 +345,24 @@ export class BrowserMeetingService {
           utteranceId: nextState.utteranceId,
           observedAt: eventAt,
         });
+        this.#parkedTranslation = null;
         this.#session.setTranslationFocus(focus.translationFocusId);
       } else {
-        await this.#translationBridge.stop({ utteranceId: previousUtteranceId, observedAt: eventAt });
+        if (typeof this.#translationBridge.phraseBoundary === "function") {
+          await this.#translationBridge.phraseBoundary({
+            utteranceId: previousUtteranceId,
+            observedAt: eventAt,
+          });
+          this.#parkedTranslation = {
+            participantId: participant.id,
+            utteranceId: previousUtteranceId,
+          };
+        } else {
+          await this.#translationBridge.stop({
+            utteranceId: previousUtteranceId,
+            observedAt: eventAt,
+          });
+        }
       }
       this.#recordParticipant("utterance-completed", participant, {
         utteranceId: previousUtteranceId,
@@ -342,6 +392,14 @@ export class BrowserMeetingService {
     const id = this.#participantIdFactory();
     if (!id || typeof id !== "string") throw new Error("participant id factory returned an invalid id");
     return { id, name: normalizedName, language };
+  }
+
+  async #releaseParticipantTranslation(participantId) {
+    if (this.#parkedTranslation?.participantId === participantId) {
+      this.#parkedTranslation = null;
+      await this.#translationBridge.stop();
+    }
+    await this.#translationBridge.release?.(participantId);
   }
 
   #enqueue(operation) {
