@@ -1,6 +1,7 @@
 export class BrowserAudioPlayout {
   #container;
   #gainByTrackId = new Map();
+  #utteranceIdByTrackId = new Map();
   #entryByTrackId = new Map();
   #onPlanApplied;
   #onPlayoutEvent;
@@ -22,18 +23,26 @@ export class BrowserAudioPlayout {
     const tracks = listeningPlan?.tracks ?? [];
     if (!Array.isArray(tracks)) throw new Error("audio plan tracks must be an array");
     const nextGains = new Map();
-    for (const { trackId, gain } of tracks) {
+    const nextUtteranceIds = new Map();
+    for (const { trackId, gain, utteranceId } of tracks) {
       if (!trackId || nextGains.has(trackId)) throw new Error("audio plan track ids must be unique");
       if (!Number.isFinite(gain) || gain < 0 || gain > 1) {
         throw new Error(`invalid audio gain for ${trackId}`);
       }
       nextGains.set(trackId, gain);
+      if (utteranceId !== undefined) {
+        if (typeof utteranceId !== "string" || !utteranceId) {
+          throw new Error(`invalid utterance id for ${trackId}`);
+        }
+        nextUtteranceIds.set(trackId, utteranceId);
+      }
     }
 
     for (const [trackId, entry] of this.#entryByTrackId) {
       if (!nextGains.has(trackId)) this.#removeEntry(trackId, entry);
     }
     this.#gainByTrackId = nextGains;
+    this.#utteranceIdByTrackId = nextUtteranceIds;
     this.#mode = listeningPlan?.mode ?? "silent";
     for (const [trackId, entry] of this.#entryByTrackId) {
       entry.element.volume = nextGains.get(trackId);
@@ -41,7 +50,13 @@ export class BrowserAudioPlayout {
     const event = {
       type: "listening-plan-applied",
       mode: listeningPlan?.mode ?? "silent",
-      tracks: tracks.map(({ trackId, kind, role, gain }) => ({ trackId, kind, role, gain })),
+      tracks: tracks.map(({ trackId, kind, role, gain, utteranceId }) => ({
+        trackId,
+        kind,
+        role,
+        gain,
+        ...(utteranceId ? { utteranceId } : {}),
+      })),
     };
     const planKey = JSON.stringify(event);
     if (planKey !== this.#planKey) {
@@ -77,19 +92,33 @@ export class BrowserAudioPlayout {
         gain: this.#gainByTrackId.get(trackId),
         result: "failed",
         errorCode: "browser-attach-failed",
+        ...this.#utteranceContext(trackId),
       });
       return false;
     }
     element.volume = this.#gainByTrackId.get(trackId);
     element.dataset.trackId = trackId;
     this.#container.append(element);
-    this.#entryByTrackId.set(trackId, { track, element });
+    const entry = {
+      track,
+      element,
+      gapActive: false,
+      playbackStarted: false,
+      lifecycleEnded: false,
+      listeners: [],
+    };
+    this.#entryByTrackId.set(trackId, entry);
+    this.#listen(entry, "waiting", () => this.#reportGap(trackId, entry));
+    this.#listen(entry, "stalled", () => this.#reportGap(trackId, entry));
+    this.#listen(entry, "playing", () => { entry.gapActive = false; });
+    this.#listen(entry, "ended", () => this.#complete(trackId, entry, "ended"));
     this.#emitPlayout({
       type: "playout-attached",
       trackId,
       listeningMode: this.#mode,
       gain: element.volume,
       result: "attached",
+      ...this.#utteranceContext(trackId),
     });
     if (typeof element.play === "function") {
       let playResult;
@@ -103,17 +132,21 @@ export class BrowserAudioPlayout {
           gain: element.volume,
           result: "failed",
           errorCode: "browser-play-failed",
+          ...this.#utteranceContext(trackId),
         });
+        entry.lifecycleEnded = true;
         return true;
       }
       Promise.resolve(playResult).then(() => {
-        if (this.#entryByTrackId.get(trackId)?.element !== element) return;
+        if (this.#entryByTrackId.get(trackId)?.element !== element || entry.lifecycleEnded) return;
+        entry.playbackStarted = true;
         this.#emitPlayout({
           type: "playout-started",
           trackId,
           listeningMode: this.#mode,
           gain: element.volume,
           result: "started",
+          ...this.#utteranceContext(trackId),
         });
       }, () => {
         if (this.#entryByTrackId.get(trackId)?.element !== element) return;
@@ -124,7 +157,9 @@ export class BrowserAudioPlayout {
           gain: element.volume,
           result: "failed",
           errorCode: "browser-play-failed",
+          ...this.#utteranceContext(trackId),
         });
+        entry.lifecycleEnded = true;
       });
     }
     return true;
@@ -141,21 +176,58 @@ export class BrowserAudioPlayout {
       this.#removeEntry(trackId, entry);
     }
     this.#gainByTrackId.clear();
+    this.#utteranceIdByTrackId.clear();
     this.#planKey = null;
     this.#mode = "silent";
   }
 
   #removeEntry(trackId, entry) {
+    for (const [type, listener] of entry.listeners) {
+      entry.element.removeEventListener?.(type, listener);
+    }
     for (const element of entry.track.detach()) element.remove();
     entry.element.remove();
     this.#entryByTrackId.delete(trackId);
+    if (entry.lifecycleEnded) return;
+    this.#complete(trackId, entry, "detached");
+  }
+
+  #listen(entry, type, listener) {
+    if (typeof entry.element.addEventListener !== "function") return;
+    entry.element.addEventListener(type, listener);
+    entry.listeners.push([type, listener]);
+  }
+
+  #reportGap(trackId, entry) {
+    if (!entry.playbackStarted || entry.lifecycleEnded || entry.gapActive) return;
+    entry.gapActive = true;
+    this.#emitPlayout({
+      type: "playout-gap",
+      trackId,
+      listeningMode: this.#mode,
+      gain: entry.element.volume,
+      result: "interrupted",
+      errorCode: "browser-playout-gap",
+      ...this.#utteranceContext(trackId),
+    });
+  }
+
+  #complete(trackId, entry, result) {
+    if (entry.lifecycleEnded) return;
+    entry.lifecycleEnded = true;
     this.#emitPlayout({
       type: "playout-completed",
       trackId,
       listeningMode: this.#mode,
       gain: entry.element.volume,
-      result: "detached",
+      result,
+      ...this.#utteranceContext(trackId),
     });
+  }
+
+  #utteranceContext(trackId) {
+    const utteranceId = this.#utteranceIdByTrackId.get(trackId);
+    return utteranceId ? { utteranceId } : {};
   }
 
   #emitPlayout(event) {

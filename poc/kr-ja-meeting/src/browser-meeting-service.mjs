@@ -9,6 +9,7 @@ const SPEECH_ACTIVITY_TYPES = new Set(["speech-start", "speech-end"]);
 const PLAYOUT_EVENT_TYPES = new Set([
   "playout-attached",
   "playout-started",
+  "playout-gap",
   "playout-completed",
   "playout-aborted",
 ]);
@@ -26,6 +27,7 @@ export class BrowserMeetingService {
   #eventRecorder;
   #clock;
   #listeningPlanKeyByParticipantId = new Map();
+  #issuedPlayoutContextByParticipantId = new Map();
   #actionChain = Promise.resolve();
 
   constructor({
@@ -36,6 +38,7 @@ export class BrowserMeetingService {
     participantIdFactory = () => `participant-${randomUUID()}`,
     utteranceIdFactory = () => `utterance-${randomUUID()}`,
     clock = () => performance.now(),
+    minimumFocusHoldMilliseconds,
     overlapWarningMilliseconds,
     onListeningEvent = () => {},
     eventRecorder = { record() {} },
@@ -52,6 +55,7 @@ export class BrowserMeetingService {
     this.#clock = clock;
     this.#translationFocusPolicy = new TranslationFocusPolicy({
       clock,
+      minimumFocusHoldMilliseconds,
       overlapWarningMilliseconds,
     });
     if (typeof onListeningEvent !== "function") throw new Error("onListeningEvent must be a function");
@@ -95,6 +99,7 @@ export class BrowserMeetingService {
       this.#recordParticipant("meeting-left", participant, { result: "left" });
       this.#recordParticipant("resources-closed", participant, { result: "closed" });
       this.#listeningPlanKeyByParticipantId.delete(participantId);
+      this.#issuedPlayoutContextByParticipantId.delete(participantId);
       return this.snapshot();
     });
   }
@@ -134,8 +139,12 @@ export class BrowserMeetingService {
         const focus = this.#translationFocusPolicy.speechStarted(participantId, eventAt);
         this.#session.setTranslationFocus(focus.translationFocusId);
         try {
-          if (!previousFocusId) {
-            await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
+          if (!previousFocusId && focus.translationFocusId) {
+            const focusedParticipant = this.#session.participant(focus.translationFocusId);
+            await this.#translationBridge.start(focusedParticipant, {
+              utteranceId: this.#utteranceIdFor(focus.translationFocusId),
+              observedAt: eventAt,
+            });
           }
           this.#recordParticipant("speech-started", participant, {
             utteranceId,
@@ -164,7 +173,7 @@ export class BrowserMeetingService {
   snapshot() {
     const focus = this.#translationFocusPolicy.snapshot(this.#eventTimestamp());
     this.#recordPendingOverlapTransitions();
-    return {
+    const snapshot = {
       ...this.#session.snapshot(),
       speakingParticipantIds: focus.speakingParticipantIds,
       translationFocusId: focus.translationFocusId,
@@ -173,6 +182,36 @@ export class BrowserMeetingService {
       },
       overlap: focus.overlap,
     };
+    this.#rememberPlayoutContexts(snapshot);
+    return snapshot;
+  }
+
+  refresh() {
+    return this.#enqueue(async () => {
+      const eventAt = this.#eventTimestamp();
+      const beforeFocus = this.#translationFocusPolicy.snapshot(eventAt);
+      const focus = this.#translationFocusPolicy.advance(eventAt);
+      if (beforeFocus.translationFocusId !== focus.translationFocusId) {
+        const participant = this.#session.participant(focus.translationFocusId);
+        const utteranceId = this.#utteranceIdFor(participant.id);
+        try {
+          await this.#translationBridge.start(participant, { utteranceId, observedAt: eventAt });
+          this.#session.setTranslationFocus(participant.id);
+          this.#recordFocusTransition(beforeFocus, focus, participant, utteranceId);
+          this.#recordListeningPlans();
+        } catch (error) {
+          this.#translationFocusPolicy.clearFocus();
+          this.#session.setTranslationFocus(null);
+          this.#recordParticipant("utterance-aborted", participant, {
+            utteranceId,
+            result: "aborted",
+            errorCode: "translation-start-failed",
+          });
+          throw error;
+        }
+      }
+      return this.snapshot();
+    });
   }
 
   playout(participantId, event = {}) {
@@ -184,22 +223,24 @@ export class BrowserMeetingService {
       if (typeof event.trackId !== "string" || !event.trackId) {
         throw new Error("playout trackId is required");
       }
-      const trackKind = event.trackId.startsWith("translation:") ? "translation"
-        : event.trackId.startsWith("original:") ? "original"
-          : null;
-      if (!trackKind) throw new Error("unsupported playout trackId");
-      const targetLanguage = trackKind === "translation"
-        ? event.trackId.slice("translation:".length)
-        : participant.language;
+      if (typeof event.utteranceId !== "string" || !event.utteranceId) {
+        throw new Error("playout utteranceId is required");
+      }
+      const key = `${event.trackId}:${event.utteranceId}`;
+      const contexts = this.#issuedPlayoutContextByParticipantId.get(participantId);
+      const context = contexts?.get(key);
+      if (!context) throw new Error("playout utteranceId does not match an issued listening plan");
+      const outcome = playoutOutcome(event);
       this.#recordParticipant(event.type, participant, {
-        targetLanguage,
-        listeningMode: event.listeningMode,
-        trackId: event.trackId,
-        trackKind,
-        gain: event.gain,
-        result: event.result,
-        errorCode: event.errorCode,
+        utteranceId: context.utteranceId,
+        targetLanguage: context.targetLanguage,
+        listeningMode: context.listeningMode,
+        trackId: context.trackId,
+        trackKind: context.trackKind,
+        gain: context.gain,
+        ...outcome,
       });
+      if (["playout-completed", "playout-aborted"].includes(event.type)) contexts.delete(key);
       return { recorded: true };
     });
   }
@@ -392,9 +433,49 @@ export class BrowserMeetingService {
     }
   }
 
+  #rememberPlayoutContexts(snapshot) {
+    for (const participant of snapshot.participants) {
+      let contexts = this.#issuedPlayoutContextByParticipantId.get(participant.id);
+      if (!contexts) {
+        contexts = new Map();
+        this.#issuedPlayoutContextByParticipantId.set(participant.id, contexts);
+      }
+      for (const track of participant.audio.tracks) {
+        if (!track.utteranceId) continue;
+        const targetLanguage = track.kind === "translation"
+          ? track.trackId.slice("translation:".length)
+          : participant.language;
+        contexts.set(`${track.trackId}:${track.utteranceId}`, {
+          utteranceId: track.utteranceId,
+          targetLanguage,
+          listeningMode: participant.audio.mode,
+          trackId: track.trackId,
+          trackKind: track.kind,
+          gain: track.gain,
+        });
+      }
+    }
+  }
+
   #eventTimestamp() {
     const timestamp = this.#clock();
     if (!Number.isFinite(timestamp)) throw new Error("meeting clock must return a finite timestamp");
     return timestamp;
   }
+}
+
+function playoutOutcome(event) {
+  if (event.type === "playout-attached") return { result: "attached" };
+  if (event.type === "playout-started") return { result: "started" };
+  if (event.type === "playout-gap") {
+    return { result: "interrupted", errorCode: "browser-playout-gap" };
+  }
+  if (event.type === "playout-completed") {
+    return { result: event.result === "ended" ? "ended" : "detached" };
+  }
+  const allowedErrorCodes = new Set(["browser-attach-failed", "browser-play-failed"]);
+  return {
+    result: "failed",
+    errorCode: allowedErrorCodes.has(event.errorCode) ? event.errorCode : "browser-playout-failed",
+  };
 }

@@ -11,6 +11,7 @@ const modeCopy = {
   "translation-only": "통역 음성만 청취",
   "original-check": "원음 확인 중 · 자동 복귀",
   "same-language-original": "같은 언어 원음",
+  "focus-pending": "원음 청취 · 통역 초점 대기",
 };
 
 const app = document.querySelector("#app");

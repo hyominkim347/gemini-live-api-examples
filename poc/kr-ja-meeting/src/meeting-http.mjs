@@ -17,7 +17,7 @@ export function createMeetingHttpServer({ service, staticRoot, vendorFiles = new
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
     try {
       if (request.method === "GET" && url.pathname === "/api/meeting") {
-        return sendJson(response, 200, service.snapshot());
+        return sendJson(response, 200, service.refresh ? await service.refresh() : service.snapshot());
       }
       if (request.method === "POST" && url.pathname === "/api/meeting/join") {
         const { name, language } = await readJson(request);

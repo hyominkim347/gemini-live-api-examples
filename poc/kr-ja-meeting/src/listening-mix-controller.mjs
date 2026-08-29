@@ -16,25 +16,25 @@ export class ListeningMixController {
       if (speaker.id === listener.id) continue;
 
       if (listener.language === speaker.language) {
-        tracks.push(originalTrack(speaker.id, "foreground", FOREGROUND_GAIN));
+        tracks.push(originalTrack(speaker.id, "foreground", FOREGROUND_GAIN, speaker.utteranceId));
         continue;
       }
 
       if (speaker.id !== focusSpeaker.id) {
         if (mode !== "translation-only") {
-          tracks.push(originalTrack(speaker.id, "background", ORIGINAL_BACKGROUND_GAIN));
+          tracks.push(originalTrack(speaker.id, "background", ORIGINAL_BACKGROUND_GAIN, speaker.utteranceId));
         }
         continue;
       }
 
       if (mode === "translation-only") {
-        tracks.push(translationTrack(listener.language));
+        tracks.push(translationTrack(listener.language, speaker.utteranceId));
       } else if (mode === "original-check") {
-        tracks.push(originalTrack(speaker.id, "foreground", FOREGROUND_GAIN));
+        tracks.push(originalTrack(speaker.id, "foreground", FOREGROUND_GAIN, speaker.utteranceId));
       } else if (mode === "translation-focused") {
         tracks.push(
-          originalTrack(speaker.id, "background", ORIGINAL_BACKGROUND_GAIN),
-          translationTrack(listener.language),
+          originalTrack(speaker.id, "background", ORIGINAL_BACKGROUND_GAIN, speaker.utteranceId),
+          translationTrack(listener.language, speaker.utteranceId),
         );
       } else {
         throw new Error(`unsupported listening mode: ${mode}`);
@@ -54,22 +54,40 @@ export class ListeningMixController {
       tracks,
     };
   }
+
+  planWithoutFocus({ listener, speakers, mode = "translation-focused" } = {}) {
+    if (!listener?.id || !listener?.language || !Array.isArray(speakers)) {
+      throw new Error("listener and speakers are required");
+    }
+    const tracks = [];
+    for (const speaker of speakers) {
+      if (speaker.id === listener.id) continue;
+      if (speaker.language === listener.language) {
+        tracks.push(originalTrack(speaker.id, "foreground", FOREGROUND_GAIN, speaker.utteranceId));
+      } else if (mode !== "translation-only") {
+        tracks.push(originalTrack(speaker.id, "background", ORIGINAL_BACKGROUND_GAIN, speaker.utteranceId));
+      }
+    }
+    return { mode: "focus-pending", tracks };
+  }
 }
 
-function translationTrack(language) {
+function translationTrack(language, utteranceId) {
   return {
     trackId: `translation:${language}`,
     kind: "translation",
     role: "foreground",
     gain: FOREGROUND_GAIN,
+    ...(utteranceId ? { utteranceId } : {}),
   };
 }
 
-function originalTrack(speakerId, role, gain) {
+function originalTrack(speakerId, role, gain, utteranceId) {
   return {
     trackId: `original:${speakerId}`,
     kind: "original",
     role,
     gain,
+    ...(utteranceId ? { utteranceId } : {}),
   };
 }

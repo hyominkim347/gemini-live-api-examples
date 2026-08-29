@@ -11,10 +11,22 @@ function fixture({ play, attachError } = {}) {
     },
   };
   const makeTrack = (trackId) => {
+    const listeners = new Map();
     const element = {
       dataset: {},
       volume: 1,
       play,
+      addEventListener(type, listener) {
+        const existing = listeners.get(type) ?? [];
+        existing.push(listener);
+        listeners.set(type, existing);
+      },
+      removeEventListener(type, listener) {
+        listeners.set(type, (listeners.get(type) ?? []).filter((item) => item !== listener));
+      },
+      dispatch(type) {
+        for (const listener of listeners.get(type) ?? []) listener();
+      },
       remove() {
         const index = children.indexOf(this);
         if (index >= 0) children.splice(index, 1);
@@ -216,4 +228,40 @@ test("synchronous browser attachment and play failures are reported without erro
     assert.equal(events.at(-1).errorCode, errorCode);
     assert.equal(JSON.stringify(events).includes("private"), false);
   }
+});
+
+test("browser start, gap, and end retain the authoritative plan utterance id", async () => {
+  const { container, makeTrack } = fixture({ play: async () => {} });
+  const events = [];
+  const playout = new BrowserAudioPlayout(container, {
+    onPlayoutEvent(event) { events.push(event); },
+  });
+  const translation = makeTrack("translation:ko");
+  playout.setPlan({
+    mode: "translation-focused",
+    tracks: [{
+      trackId: translation.trackId,
+      kind: "translation",
+      role: "foreground",
+      gain: 1,
+      utteranceId: "utterance-7",
+    }],
+  });
+
+  playout.attach(translation, { trackName: translation.trackId });
+  await new Promise((resolve) => setImmediate(resolve));
+  translation.element.dispatch("waiting");
+  translation.element.dispatch("waiting");
+  translation.element.dispatch("playing");
+  playout.detach(translation);
+
+  assert.deepEqual(
+    events.filter(({ type }) => ["playout-started", "playout-gap", "playout-completed"].includes(type))
+      .map(({ type, utteranceId }) => ({ type, utteranceId })),
+    [
+      { type: "playout-started", utteranceId: "utterance-7" },
+      { type: "playout-gap", utteranceId: "utterance-7" },
+      { type: "playout-completed", utteranceId: "utterance-7" },
+    ],
+  );
 });

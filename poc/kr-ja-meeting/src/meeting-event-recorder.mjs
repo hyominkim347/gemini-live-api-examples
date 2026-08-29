@@ -35,6 +35,7 @@ const EVENT_TYPES = new Set([
   "listening-gain-applied",
   "playout-attached",
   "playout-started",
+  "playout-gap",
   "playout-completed",
   "playout-aborted",
   "utterance-completed",
