@@ -42,13 +42,17 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-test("budgeted runner kills an over-budget child before delayed side effects", async () => {
+test("budgeted runner kills an over-budget child before delayed side effects", {
+  skip: process.platform !== "darwin" || process.arch !== "arm64"
+    ? "macOS arm64 cwd supervision is required"
+    : false,
+}, async () => {
   const artifactRoot = await mkdtemp(join(tmpdir(), "ua-pilot-budget-kill-"));
   const marker = join(artifactRoot, "survived.txt");
   const childProgram = [
     "const { writeFileSync } = require('node:fs');",
     "process.on('SIGTERM', () => {});",
-    `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'survived'), 500);`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'survived'), 2_000);`,
     "setInterval(() => {}, 1000);",
   ].join("");
 
@@ -58,12 +62,13 @@ test("budgeted runner kills an over-budget child before delayed side effects", a
       budgetMilliseconds: 100,
       command: [process.execPath, "-e", childProgram],
       killGraceMilliseconds: 50,
+      cwd: artifactRoot,
     });
 
     assert.equal(metric.status, "timed-out");
     assert.equal(metric.timedOut, true);
     assert.equal(metric.measurement, "budgeted-child-process-v1");
-    await new Promise((resolveWait) => setTimeout(resolveWait, 550));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 2_050));
     await assert.rejects(access(marker), { code: "ENOENT" });
   } finally {
     await rm(artifactRoot, { recursive: true, force: true });

@@ -28,6 +28,7 @@ import {
   resolveTrustedCodexIdentity,
   resolvePilotChildPath,
   spawnTrustedCodexChild,
+  stageTrustedCodexRuntime,
   validateIsolatedMaterialLayout,
 } from "./pilot-local-safety.mjs";
 
@@ -804,7 +805,9 @@ export async function runAgentComparison({
   if (loaded.mode === "frozen-legacy") {
     throw new Error("Frozen legacy Agent comparison evidence is read-only; use verify");
   }
-  const codexIdentity = await resolveTrustedCodexIdentity();
+  const codexIdentity = await stageTrustedCodexRuntime(
+    await resolveTrustedCodexIdentity(),
+  );
   const { resultRoot, plan, schemaPath } = loaded;
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
@@ -850,6 +853,7 @@ export async function runAgentComparison({
       args,
       prompt,
       timeoutMs: run.timeoutMs,
+      supervisionRoot: materialRoot,
     });
     const answerTimeMs = Math.max(0.01, Math.round((performance.now() - start) * 100) / 100);
     const finishedAt = new Date().toISOString();

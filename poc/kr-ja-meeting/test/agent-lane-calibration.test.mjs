@@ -283,6 +283,7 @@ writeFileSync(args[outputIndex + 1], JSON.stringify(${JSON.stringify({
       args: ["--output-last-message", resolve(paths.root, "answer.json")],
       prompt: "",
       timeoutMs: 5_000,
+      supervisionRoot: paths.root,
     });
     const names = JSON.parse(await readFile(capturedNames, "utf8"));
     assert.equal(result.status, 0);
@@ -309,6 +310,7 @@ setInterval(() => {}, 1000);
       args: [],
       prompt: "",
       timeoutMs: 500,
+      supervisionRoot: paths.root,
     });
     assert.equal(result.timedOut, true);
   } finally {
@@ -338,6 +340,7 @@ setInterval(() => {}, 1000);
       args: ["--output-last-message", resolve(paths.root, "answer.json")],
       prompt: "",
       timeoutMs: 5_000,
+      supervisionRoot: paths.root,
     });
     assert.equal(result.error?.code, "ENOBUFS");
   } finally {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -21,6 +21,8 @@ import {
   resolveTrustedCodexIdentity,
   requirePilotChildDirectory,
   spawnCodexChild,
+  spawnTrustedCodexChild,
+  stageTrustedCodexRuntime,
 } from "../scripts/pilot-local-safety.mjs";
 
 const supportsFrozenCodexRuntime = process.platform === "darwin" && process.arch === "arm64";
@@ -197,28 +199,100 @@ test("frozen Codex runtime allows macOS arm64 and fails closed elsewhere", () =>
   );
 });
 
-test("process-group timeouts fail closed on Windows", () => {
-  assert.throws(
-    () => requirePosixProcessGroups("win32"),
-    /requires a POSIX platform/,
-  );
-  assert.doesNotThrow(() => requirePosixProcessGroups("darwin"));
-  assert.doesNotThrow(() => requirePosixProcessGroups("linux"));
+test("trusted Codex execution uses staged bytes after the source identity is swapped", {
+  skip: supportsFrozenCodexRuntime
+    ? false
+    : "frozen Codex runtime requires macOS arm64",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-codex-source-swap-"));
+  let staged;
+  try {
+    const installed = await resolveTrustedCodexIdentity();
+    const nvmRoot = join(root, "nvm");
+    const packageRoot = join(nvmRoot, "lib/node_modules/@openai/codex");
+    const nativeRoot = join(packageRoot, "node_modules/@openai/codex-darwin-arm64");
+    await mkdir(join(nvmRoot, "bin"), { recursive: true });
+    await mkdir(join(packageRoot, "bin"), { recursive: true });
+    await mkdir(join(nativeRoot, "vendor/aarch64-apple-darwin/bin"), { recursive: true });
+    await Promise.all([
+      copyFile(installed.codexExecutable, join(nativeRoot, "vendor/aarch64-apple-darwin/bin/codex")),
+      copyFile(installed.codexEntrypoint, join(packageRoot, "bin/codex.js")),
+      copyFile(installed.packageJson, join(packageRoot, "package.json")),
+      copyFile(installed.nativePackageJson, join(nativeRoot, "package.json")),
+    ]);
+    const source = await resolveTrustedCodexIdentity({
+      environment: { NVM_BIN: join(nvmRoot, "bin") },
+    });
+    staged = await stageTrustedCodexRuntime(source);
+
+    await writeFile(source.codexExecutable, "source identity swapped\n", "utf8");
+    const result = await spawnTrustedCodexChild({
+      identity: staged,
+      args: ["--version"],
+      prompt: "",
+      timeoutMs: 10_000,
+      supervisionRoot: staged.runtimeRoot,
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /codex-cli 0\.151\.0/);
+
+    await chmod(staged.codexExecutable, 0o555);
+    await assert.rejects(
+      spawnTrustedCodexChild({
+        identity: staged,
+        args: ["--version"],
+        prompt: "",
+        timeoutMs: 10_000,
+        supervisionRoot: staged.runtimeRoot,
+      }),
+      /private|permission|staged/i,
+    );
+    await chmod(staged.codexExecutable, 0o500);
+    await rm(staged.codexExecutable);
+    await symlink(installed.codexExecutable, staged.codexExecutable);
+    await assert.rejects(
+      spawnTrustedCodexChild({
+        identity: staged,
+        args: ["--version"],
+        prompt: "",
+        timeoutMs: 10_000,
+        supervisionRoot: staged.runtimeRoot,
+      }),
+      /staged|symlink|identity/i,
+    );
+  } finally {
+    if (staged?.runtimeRoot) await rm(staged.runtimeRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
-test("Codex timeout kills the child process group before a descendant side effect", {
-  skip: process.platform === "win32" ? "POSIX process groups are required" : false,
+test("provider supervision fails closed outside macOS arm64", () => {
+  assert.throws(
+    () => requirePosixProcessGroups("win32"),
+    /requires macOS arm64/,
+  );
+  assert.throws(() => requirePosixProcessGroups("linux", "x64"), /requires macOS arm64/);
+  assert.throws(() => requirePosixProcessGroups("darwin", "x64"), /requires macOS arm64/);
+  assert.doesNotThrow(() => requirePosixProcessGroups("darwin", "arm64"));
+});
+
+test("Codex timeout kills a detached descendant before its side effect", {
+  skip: supportsFrozenCodexRuntime
+    ? false
+    : "macOS arm64 cwd supervision is required",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "ua-codex-timeout-"));
   const marker = join(root, "descendant-survived.txt");
   const descendantProgram = [
     "const { writeFileSync } = require('node:fs');",
     "process.on('SIGTERM', () => {});",
-    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 500);`,
+    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 2_000);`,
   ].join("");
   const parentProgram = [
     "const { spawn } = require('node:child_process');",
-    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantProgram)}], { stdio: 'ignore' });`,
+    "const childEnv = { PATH: process.env.PATH };",
+    "delete childEnv.UA_PILOT_RUN_ID;",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantProgram)}], { detached: true, stdio: 'ignore', env: childEnv });`,
     "child.unref();",
     "process.on('SIGTERM', () => process.exit(0));",
     "setInterval(() => {}, 1000);",
@@ -231,8 +305,9 @@ test("Codex timeout kills the child process group before a descendant side effec
       prompt: "",
       timeoutMs: 100,
       killGraceMilliseconds: 50,
+      supervisionRoot: root,
     });
-    await new Promise((resolveWait) => setTimeout(resolveWait, 550));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 2_050));
 
     await assert.rejects(access(marker), { code: "ENOENT" });
     assert.equal(result.timedOut, true);
@@ -243,14 +318,16 @@ test("Codex timeout kills the child process group before a descendant side effec
 });
 
 test("Codex success cleans a background descendant before returning", {
-  skip: process.platform === "win32" ? "POSIX process groups are required" : false,
+  skip: supportsFrozenCodexRuntime
+    ? false
+    : "macOS arm64 cwd supervision is required",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "ua-codex-success-cleanup-"));
   const marker = join(root, "background-descendant-survived.txt");
   const descendantProgram = [
     "const { writeFileSync } = require('node:fs');",
     "process.on('SIGTERM', () => {});",
-    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 400);`,
+    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 2_000);`,
   ].join("");
   const leaderProgram = [
     "const { spawn } = require('node:child_process');",
@@ -266,8 +343,49 @@ test("Codex success cleans a background descendant before returning", {
       prompt: "",
       timeoutMs: 1_000,
       killGraceMilliseconds: 50,
+      supervisionRoot: root,
     });
-    await new Promise((resolveWait) => setTimeout(resolveWait, 450));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 2_050));
+
+    assert.equal(result.status, 0);
+    assert.equal(result.timedOut, false);
+    await assert.rejects(access(marker), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex success cleans a descendant that creates a detached process group", {
+  skip: supportsFrozenCodexRuntime
+    ? false
+    : "macOS arm64 cwd supervision is required",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-codex-detached-cleanup-"));
+  const marker = join(root, "detached-descendant-survived.txt");
+  const descendantProgram = [
+    "const { writeFileSync } = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 2_000);`,
+  ].join("");
+  const leaderProgram = [
+    "const { spawn } = require('node:child_process');",
+    "const childEnv = { PATH: process.env.PATH };",
+    "delete childEnv.UA_PILOT_RUN_ID;",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantProgram)}], { detached: true, stdio: 'ignore', env: childEnv });`,
+    "child.unref();",
+    "process.exit(0);",
+  ].join("");
+
+  try {
+    const result = await spawnCodexChild({
+      executable: process.execPath,
+      args: ["-e", leaderProgram],
+      prompt: "",
+      timeoutMs: 1_000,
+      killGraceMilliseconds: 50,
+      supervisionRoot: root,
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 2_050));
 
     assert.equal(result.status, 0);
     assert.equal(result.timedOut, false);

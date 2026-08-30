@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants as fsConstants, lstatSync, realpathSync } from "node:fs";
 import {
+  chmod,
   copyFile,
   lstat,
   mkdir,
@@ -395,38 +397,159 @@ export async function assertTrustedCodexIdentity(identity) {
   return current;
 }
 
-function signalProcessGroup(child, signal) {
-  if (child.pid && process.platform !== "win32") {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch (error) {
-      if (error.code !== "ESRCH") throw error;
-      return;
+async function stagedCodexIdentity(runtimeRoot) {
+  const approvedRoot = await requireApprovedPilotOutput(
+    runtimeRoot,
+    "Staged Codex runtime",
+    { rejectSymlinkPath: true },
+  );
+  await assertIsolatedMaterialRoot(approvedRoot);
+  const rootStat = await lstat(approvedRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("Staged Codex runtime must be a private non-symlink directory");
+  }
+  if ((rootStat.mode & 0o077) !== 0) {
+    throw new Error("Staged Codex runtime permissions must be private to the runner owner");
+  }
+  const requiredPaths = [
+    ["bin/codex.js", 0o400],
+    ["package.json", 0o400],
+    ["node_modules/@openai/codex-darwin-arm64/package.json", 0o400],
+    ["node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex", 0o500],
+  ];
+  for (const [relativePath, requiredMode] of requiredPaths) {
+    const parts = relativePath.split("/");
+    let current = approvedRoot;
+    for (const [index, part] of parts.entries()) {
+      current = resolve(current, part);
+      const currentStat = await lstat(current);
+      const isLeaf = index === parts.length - 1;
+      if (currentStat.isSymbolicLink()) {
+        throw new Error("Staged Codex runtime must not contain symlinks");
+      }
+      if ((currentStat.mode & 0o077) !== 0) {
+        throw new Error("Staged Codex runtime permissions must be private to the runner owner");
+      }
+      if (isLeaf) {
+        if (!currentStat.isFile() || (currentStat.mode & 0o777) !== requiredMode) {
+          throw new Error("Staged Codex runtime file permissions changed before execution");
+        }
+      } else if (!currentStat.isDirectory()) {
+        throw new Error("Staged Codex runtime layout is invalid");
+      }
     }
   }
-  try {
-    child.kill(signal);
-  } catch (error) {
-    if (error.code !== "ESRCH") throw error;
+  const current = await trustedExecutableIdentity({ codexPackageRoot: approvedRoot });
+  return {
+    identityKind: "staged-codex-runtime-v1",
+    runtimeRoot: approvedRoot,
+    ...current,
+  };
+}
+
+export async function assertStagedCodexIdentity(identity) {
+  if (
+    identity?.identityKind !== "staged-codex-runtime-v1" ||
+    !identity.runtimeRoot
+  ) {
+    throw new Error("Staged Codex executable identity is missing");
+  }
+  const current = await stagedCodexIdentity(identity.runtimeRoot);
+  if (JSON.stringify(current) !== JSON.stringify(identity)) {
+    throw new Error("Staged Codex executable identity or digest changed before execution");
+  }
+  return current;
+}
+
+export async function stageTrustedCodexRuntime(sourceIdentity) {
+  const source = await assertTrustedCodexIdentity(sourceIdentity);
+  const runtimeRoot = await createIsolatedMaterialRoot("codex-runtime-");
+  const nativeRoot = resolve(
+    runtimeRoot,
+    "node_modules/@openai/codex-darwin-arm64",
+  );
+  await mkdir(resolve(runtimeRoot, "bin"), { recursive: true, mode: 0o700 });
+  await mkdir(resolve(nativeRoot, "vendor/aarch64-apple-darwin/bin"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  const stagedPaths = {
+    codexExecutable: resolve(nativeRoot, "vendor/aarch64-apple-darwin/bin/codex"),
+    codexEntrypoint: resolve(runtimeRoot, "bin/codex.js"),
+    packageJson: resolve(runtimeRoot, "package.json"),
+    nativePackageJson: resolve(nativeRoot, "package.json"),
+  };
+  await Promise.all([
+    copyFile(source.codexExecutable, stagedPaths.codexExecutable, fsConstants.COPYFILE_EXCL),
+    copyFile(source.codexEntrypoint, stagedPaths.codexEntrypoint, fsConstants.COPYFILE_EXCL),
+    copyFile(source.packageJson, stagedPaths.packageJson, fsConstants.COPYFILE_EXCL),
+    copyFile(source.nativePackageJson, stagedPaths.nativePackageJson, fsConstants.COPYFILE_EXCL),
+  ]);
+  await Promise.all([
+    chmod(stagedPaths.codexExecutable, 0o500),
+    chmod(stagedPaths.codexEntrypoint, 0o400),
+    chmod(stagedPaths.packageJson, 0o400),
+    chmod(stagedPaths.nativePackageJson, 0o400),
+  ]);
+  return stagedCodexIdentity(runtimeRoot);
+}
+
+function canonicalSupervisionRoot(path) {
+  const requested = resolve(path);
+  if (lstatSync(requested).isSymbolicLink()) {
+    throw new Error("Provider supervision root must not be a symlink");
+  }
+  const root = realpathSync(requested);
+  const rootStat = lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("Provider supervision root must be a non-symlink directory");
+  }
+  return root;
+}
+
+function supervisedProcessIds(supervisionRoot, pid) {
+  // This is an OS-observed boundary for ordinary provider/tool descendants,
+  // including children that clear their environment or create a new session.
+  // It is not a claim of containment against a same-user process that
+  // deliberately changes cwd or tampers with this runner.
+  const args = ["-n", "-P", "-a"];
+  if (pid) args.push("-p", String(pid));
+  args.push("-d", "cwd", "+D", supervisionRoot, "-F", "p");
+  const result = spawnSync("/usr/sbin/lsof", args, {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (![0, 1].includes(result.status)) {
+    throw new Error("Unable to enumerate supervised provider descendants");
+  }
+  return result.stdout
+    .split("\n")
+    .filter((line) => /^p\d+$/.test(line))
+    .map((line) => Number.parseInt(line.slice(1), 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 1 && pid !== process.pid);
+}
+
+function signalSupervisedProcesses(supervisionRoot, signal) {
+  for (const pid of supervisedProcessIds(supervisionRoot)) {
+    if (!supervisedProcessIds(supervisionRoot, pid).includes(pid)) continue;
+    try {
+      process.kill(pid, signal);
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
   }
 }
 
-function processGroupAlive(child) {
-  if (!child.pid || process.platform === "win32") return false;
-  try {
-    process.kill(-child.pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === "ESRCH") return false;
-    if (error.code === "EPERM") return true;
-    throw error;
-  }
+function supervisedProcessesAlive(supervisionRoot) {
+  return supervisedProcessIds(supervisionRoot).length > 0;
 }
 
-export function requirePosixProcessGroups(platform = process.platform) {
-  if (platform === "win32") {
-    throw new Error("process-group timeout execution requires a POSIX platform");
+export function requirePosixProcessGroups(
+  platform = process.platform,
+  architecture = process.arch,
+) {
+  if (platform !== "darwin" || architecture !== "arm64") {
+    throw new Error("provider supervision requires macOS arm64");
   }
 }
 
@@ -434,6 +557,7 @@ export function runProcessGroupWithTimeout({
   executable,
   args = [],
   cwd = process.cwd(),
+  supervisionRoot = cwd,
   env = process.env,
   input,
   timeoutMs,
@@ -459,10 +583,18 @@ export function runProcessGroupWithTimeout({
   if (!Number.isFinite(maxBuffer) || maxBuffer <= 0) {
     throw new TypeError("maxBuffer must be a positive finite number");
   }
+  if (typeof supervisionRoot !== "string" || !supervisionRoot) {
+    throw new TypeError("supervisionRoot must be an explicit isolated directory");
+  }
   requirePosixProcessGroups();
+  const supervisedRoot = canonicalSupervisionRoot(supervisionRoot);
+  const supervisedCwd = realpathSync(resolve(cwd));
+  if (!pathIsInside(supervisedRoot, supervisedCwd)) {
+    throw new Error("Provider cwd must stay inside its supervision root");
+  }
 
   const child = spawn(executable, args, {
-    cwd,
+    cwd: supervisedCwd,
     env,
     detached: true,
     stdio: [
@@ -483,6 +615,7 @@ export function runProcessGroupWithTimeout({
     let forceKillComplete = false;
     let settled = false;
     let forceKillTimer;
+    let cleanupVerificationTimer;
 
     const result = () => ({
       status: closeResult?.status ?? null,
@@ -498,24 +631,46 @@ export function runProcessGroupWithTimeout({
       settled = true;
       clearTimeout(timeoutTimer);
       clearTimeout(forceKillTimer);
+      clearTimeout(cleanupVerificationTimer);
       resolveResult(result());
+    };
+    const verifyForcedCleanup = (deadline) => {
+      let survivors = [];
+      try {
+        survivors = supervisedProcessIds(supervisedRoot);
+      } catch (error) {
+        processError ??= error;
+      }
+      if (survivors.length > 0 && Date.now() < deadline) {
+        cleanupVerificationTimer = setTimeout(
+          () => verifyForcedCleanup(deadline),
+          25,
+        );
+        return;
+      }
+      if (survivors.length > 0) {
+        processError ??= new Error(
+          "Supervised provider descendants survived bounded cleanup",
+        );
+      }
+      forceKillComplete = true;
+      finishIfReady();
     };
     const beginTermination = () => {
       if (terminationStarted) return;
       terminationStarted = true;
       try {
-        signalProcessGroup(child, "SIGTERM");
+        signalSupervisedProcesses(supervisedRoot, "SIGTERM");
       } catch (error) {
         processError ??= error;
       }
       forceKillTimer = setTimeout(() => {
         try {
-          signalProcessGroup(child, "SIGKILL");
+          signalSupervisedProcesses(supervisedRoot, "SIGKILL");
         } catch (error) {
           processError ??= error;
         }
-        forceKillComplete = true;
-        finishIfReady();
+        verifyForcedCleanup(Date.now() + 250);
       }, killGraceMilliseconds);
     };
     const capture = (target) => (chunk) => {
@@ -532,7 +687,7 @@ export function runProcessGroupWithTimeout({
     const handleLeaderExit = (status, signal) => {
       closeResult ??= { status, signal };
       try {
-        if (processGroupAlive(child)) {
+        if (supervisedProcessesAlive(supervisedRoot)) {
           beginTermination();
         } else {
           forceKillComplete = true;
@@ -576,10 +731,13 @@ export function spawnCodexChild({
   prompt,
   timeoutMs,
   killGraceMilliseconds = 250,
+  supervisionRoot,
 }) {
   return runProcessGroupWithTimeout({
     executable,
     args,
+    cwd: supervisionRoot,
+    supervisionRoot,
     input: prompt,
     env: buildCodexChildEnv(),
     timeoutMs,
@@ -595,14 +753,16 @@ export async function spawnTrustedCodexChild({
   prompt,
   timeoutMs,
   killGraceMilliseconds = 250,
+  supervisionRoot,
 }) {
-  const trusted = await assertTrustedCodexIdentity(identity);
+  const trusted = await assertStagedCodexIdentity(identity);
   return spawnCodexChild({
     executable: trusted.codexExecutable,
     args,
     prompt,
     timeoutMs,
     killGraceMilliseconds,
+    supervisionRoot,
   });
 }
 

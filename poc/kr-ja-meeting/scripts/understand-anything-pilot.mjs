@@ -75,7 +75,7 @@ export async function runBudgetedPilotPhase({
   phase,
   budgetMilliseconds,
   command,
-  cwd = process.cwd(),
+  cwd,
   env = process.env,
   killGraceMilliseconds = 1_000,
   stdinText,
@@ -93,6 +93,9 @@ export async function runBudgetedPilotPhase({
   if (!Number.isFinite(killGraceMilliseconds) || killGraceMilliseconds < 0) {
     throw new TypeError("killGraceMilliseconds must be a non-negative finite number");
   }
+  if (typeof cwd !== "string" || !cwd) {
+    throw new TypeError("cwd must be an explicit isolated supervision root");
+  }
 
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -100,6 +103,7 @@ export async function runBudgetedPilotPhase({
     executable: command[0],
     args: command.slice(1),
     cwd,
+    supervisionRoot: cwd,
     env,
     input: stdinText,
     timeoutMs: budgetMilliseconds,

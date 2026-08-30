@@ -20,6 +20,7 @@ import {
   requireApprovedPilotOutput,
   resolveTrustedCodexIdentity,
   spawnTrustedCodexChild,
+  stageTrustedCodexRuntime,
 } from "./pilot-local-safety.mjs";
 
 const PROVIDER = "current-codex-provider-only";
@@ -369,7 +370,9 @@ export async function runCalibration({
   loadPilotInputs = loadCurrentPilotArtifact,
   createMaterialRoot = () => createIsolatedMaterialRoot("ua-calibration-material-"),
 }) {
-  const codexIdentity = await resolveTrustedCodexIdentity();
+  const codexIdentity = await stageTrustedCodexRuntime(
+    await resolveTrustedCodexIdentity(),
+  );
   const prepared = await prepareCalibration({
     pilotArtifactRoot,
     outputDir,
@@ -391,6 +394,7 @@ export async function runCalibration({
     args,
     prompt,
     timeoutMs,
+    supervisionRoot: prepared.materialRoot,
   });
   const answerTimeMs = Math.round((performance.now() - start) * 100) / 100;
   const finishedAt = new Date().toISOString();
