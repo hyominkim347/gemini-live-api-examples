@@ -53,7 +53,7 @@ class PilotAcceptance(unittest.TestCase):
         self.assertEqual(result["metrics"]["medianTimeReduction"], -0.109)
         self.assertEqual(
             hashlib.sha256(output_path.read_bytes()).hexdigest(),
-            "f3d9b86cde4792af752373ef2eb5e0829184259938c2006084a762591a968205",
+            "3cc28dbc73285f31862233ff1f95bb193830fce76334bf820cc00e425ec90103",
         )
 
 

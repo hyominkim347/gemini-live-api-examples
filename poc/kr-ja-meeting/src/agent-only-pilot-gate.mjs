@@ -11,7 +11,7 @@ const GRAPH_ARM = "understandAnythingGraph";
 const RG_ARM = "repositorySearchRg";
 const SCORER_REVISION = "agent-only-gate-v3";
 const OUTPUT_CONTRACT_VERSION = 2;
-const SEMANTIC_RULE_REVISION = "expected-summary-subject-bound-claims-v1";
+const SEMANTIC_RULE_REVISION = "expected-summary-subject-bound-claims-v2";
 const SOFT_MATCH_NUMERATOR = 2;
 const SOFT_MATCH_DENOMINATOR = 3;
 const ANSWER_CLAUSE_WINDOW = 1;
@@ -128,6 +128,21 @@ const SEMANTIC_CONCEPT_DEFINITIONS = [
   { concept: "ja", kind: "entity", aliases: ["ja", "일본어"] },
 ];
 
+const ASSERTIVE_ENGLISH_FORMS = [
+  "affect", "affected", "affecting", "affects", "applied", "applies",
+  "applying", "are", "can", "change", "changed", "changes", "changing",
+  "checked", "checking", "checks", "closed", "closes", "closing",
+  "connected", "connecting", "connects", "created", "creates", "creating",
+  "depend", "depended", "depending", "depends", "disposed", "disposes",
+  "disposing", "do", "does", "drained", "draining", "drains", "has", "have",
+  "held", "holding", "holds", "impact", "impacted", "impacting", "impacts",
+  "is", "keeping", "keeps", "kept", "removed", "removes", "removing",
+  "restored", "restores", "restoring", "retried", "retries", "retrying",
+  "stored", "stores", "storing", "waited", "waiting", "waits", "was", "were",
+  "will",
+];
+const ASSERTIVE_ENGLISH_FORM_SET = new Set(ASSERTIVE_ENGLISH_FORMS);
+
 const CRITICAL_SEMANTIC_CONCEPTS = [
   "boundary",
   "decision",
@@ -160,12 +175,16 @@ const SEMANTIC_RULE_DEFINITION = {
   answerClauseWindow: ANSWER_CLAUSE_WINDOW,
   expectedClausePolicy: "sentence-comma-and-technical-subject-conjunction",
   answerClausePolicy: "sentence",
-  atomNegationPolicy: "explicit-marker-two-before-three-after-v2",
+  atomNegationPolicy: "directional-marker-plus-negated-identifier-v4",
   identifierPolicy: "full-or-two-thirds-subtokens",
-  polarityPolicy: "explicit-impact-or-explicit-independence-v1",
+  polarityPolicy: "subject-scoped-conflict-between-impact-and-independence-v3",
+  polaritySubjectPolicy: "nfkc-particle-article-camelcase-token-key-v1",
+  impactCuePolicy: "asserted-clause-excluding-conditional-change-v1",
   softMatch: `${SOFT_MATCH_NUMERATOR}/${SOFT_MATCH_DENOMINATOR}`,
   criticalMatch: "all",
-  subjectMatch: "each-predicate-clause-leading-identifier-or-first-entity-all",
+  subjectMatch: "leading-technical-or-topic-subject-before-predicate-v4",
+  predicateAttributionPolicy: "versioned-finite-form-with-subject-prefix-v2",
+  assertiveEnglishForms: ASSERTIVE_ENGLISH_FORMS,
   claimGroupMatch: "all",
   criticalConcepts: CRITICAL_SEMANTIC_CONCEPTS,
   stopWords: [...SEMANTIC_STOP_WORDS].sort(),
@@ -338,7 +357,9 @@ function evaluateSemanticCorrectness(expectedSummary, answer, { unknown }) {
   const answerClauses = splitAnswerClauses(answer);
   const answerWindows = clauseWindows(answerClauses).map(({ text, indexes }) => ({
     indexes,
+    text,
     atoms: semanticAtoms(text),
+    assertive: clauseIsAssertive(text),
   }));
   const expectedClauses = splitExpectedClaimClauses(expectedSummary)
     .map((text) => ({ text, atoms: semanticAtoms(text) }))
@@ -364,9 +385,11 @@ function evaluateSemanticCorrectness(expectedSummary, answer, { unknown }) {
   const failureCodes = [];
   if (unknown) failureCodes.push("answer-unknown");
   if (interrogative) failureCodes.push("answer-interrogative");
+  if (answerPolarity === "conflict") failureCodes.push("polarity-conflict");
   if (
     answerPolarity === "contradictory" ||
-    claimGroups.some(({ contradictedCriticalAtoms }) => contradictedCriticalAtoms.length > 0)
+    claimGroups.some(({ contradictedCriticalAtoms, contradictedSubjectAtoms }) =>
+      contradictedCriticalAtoms.length > 0 || contradictedSubjectAtoms.length > 0)
   ) {
     failureCodes.push("answer-contradictory");
   }
@@ -383,6 +406,7 @@ function evaluateSemanticCorrectness(expectedSummary, answer, { unknown }) {
     guards: {
       unknown,
       interrogative,
+      polarityConflict: answerPolarity === "conflict",
       polarityCompatible: expectedPolarity === answerPolarity,
     },
     claimGroups,
@@ -406,16 +430,29 @@ function scoreClaimGroup({
   const requiredSoftMatches = Math.ceil(
     (softAtoms.length * SOFT_MATCH_NUMERATOR) / SOFT_MATCH_DENOMINATOR,
   );
-  const subjectClauses = answerWindows.flatMap((window) => {
+  const allAnswerAtoms = answerWindows.flatMap(({ atoms: windowAtoms }) => windowAtoms);
+  const contradictedSubjectAtoms = subjectAtoms
+    .filter((expectedAtom) => allAnswerAtoms.some((answerAtom) =>
+      answerAtom.concept === expectedAtom.concept &&
+      answerAtom.negated !== expectedAtom.negated))
+    .map(({ concept, kind, surface, negated }) => ({ concept, kind, surface, negated }));
+  const subjectMatches = answerWindows.flatMap((window) => {
     const matchedSubjectAtoms = matchSemanticAtoms(subjectAtoms, window.atoms);
     const missingSubjectAtoms = missingSemanticAtoms(subjectAtoms, matchedSubjectAtoms);
     const subjectPassed = subjectAtoms.length > 0 && missingSubjectAtoms.length === 0;
     return subjectPassed ? [{
       answerClauseIndexes: window.indexes,
       matchedSubjectAtoms,
-      atoms: window.atoms,
+      text: window.text,
+      assertive: window.assertive,
     }] : [];
   });
+  const subjectClauses = subjectMatches.flatMap((match) =>
+    attributedPredicateSegments(match.text, subjectAtoms).map(({ atoms: attributedAtoms }) => ({
+      answerClauseIndexes: match.answerClauseIndexes,
+      matchedSubjectAtoms: match.matchedSubjectAtoms,
+      atoms: attributedAtoms,
+    })));
   const subjectScopedAtoms = subjectClauses.flatMap(({ atoms }) => atoms);
   const matchedCriticalAtoms = matchSemanticAtoms(criticalAtoms, subjectScopedAtoms);
   const matchedSoftAtoms = matchSemanticAtoms(softAtoms, subjectScopedAtoms);
@@ -431,14 +468,20 @@ function scoreClaimGroup({
   const criticalPassed =
     missingCriticalAtoms.length === 0 && contradictedCriticalAtoms.length === 0;
   const softPassed = matchedSoftAtoms.length >= requiredSoftMatches;
-  const subjectPassed = subjectClauses.length > 0;
-  const passed = polarityCompatible && criticalPassed && softPassed && subjectPassed;
+  const subjectPassed =
+    subjectMatches.length > 0 && contradictedSubjectAtoms.length === 0;
+  const predicateAttributionPassed = subjectClauses.length > 0;
+  const passed =
+    polarityCompatible && criticalPassed && softPassed && subjectPassed &&
+    predicateAttributionPassed;
   const failureCodes = [];
   if (!polarityCompatible) failureCodes.push("polarity-mismatch");
   if (missingCriticalAtoms.length > 0) failureCodes.push("critical-atoms-missing");
   if (contradictedCriticalAtoms.length > 0) failureCodes.push("critical-atom-contradicted");
   if (!softPassed) failureCodes.push("soft-atom-coverage-below-two-thirds");
   if (!subjectPassed) failureCodes.push("subject-atom-missing");
+  if (contradictedSubjectAtoms.length > 0) failureCodes.push("subject-atom-contradicted");
+  if (!predicateAttributionPassed) failureCodes.push("predicate-attribution-missing");
 
   return {
     index,
@@ -447,6 +490,8 @@ function scoreClaimGroup({
     softAtoms: atomAudit(softAtoms),
     requiredSoftMatches,
     subjectAtoms: atomAudit(subjectAtoms),
+    subjectClauseIndexes: subjectMatches.flatMap(({ answerClauseIndexes }) =>
+      answerClauseIndexes),
     answerClauseIndexes: subjectClauses.flatMap(({ answerClauseIndexes }) =>
       answerClauseIndexes),
     matchedCriticalAtoms,
@@ -455,10 +500,12 @@ function scoreClaimGroup({
     missingSoftAtoms,
     matchedSubjectAtoms,
     missingSubjectAtoms,
+    contradictedSubjectAtoms,
     contradictedCriticalAtoms,
     criticalPassed,
     softPassed,
     subjectPassed,
+    predicateAttributionPassed,
     passed,
     failureCodes,
   };
@@ -471,7 +518,14 @@ function matchSemanticAtoms(expectedAtoms, answerAtoms) {
   return expectedAtoms.flatMap((expectedAtom) => {
     let answerAtom = answerByConcept.get(semanticAtomKey(expectedAtom));
     let aliasRule;
-    if (!answerAtom && expectedAtom.identifierSubconcepts?.length > 0) {
+    const oppositeIdentifierKey = `${expectedAtom.concept}:${expectedAtom.negated
+      ? "asserted"
+      : "negated"}`;
+    if (
+      !answerAtom &&
+      expectedAtom.identifierSubconcepts?.length > 0 &&
+      !answerByConcept.has(oppositeIdentifierKey)
+    ) {
       const matchedSubconcepts = expectedAtom.identifierSubconcepts.filter((concept) =>
         answerByConcept.has(`${concept}:asserted`));
       const required = Math.ceil(
@@ -527,35 +581,238 @@ function semanticPolarity(value) {
   }
   if (/(?:정반대|opposite)/u.test(normalized)) return "contradictory";
 
-  const positiveImpact = /(?:영향|달라|바꾸|변경|affect|impact|change)/u.test(normalized);
-  const explicitNoImpact =
-    /영향[^.!?]{0,20}(?:없|않)/u.test(normalized) ||
-    /(?:no|without)\s+(?:direct\s+)?impact/u.test(normalized);
-  const independence =
-    /(?:별도|독립)\s*(?:실행|단위)?/u.test(normalized) ||
-    /(?:separate|independent)(?:\s+(?:runtime|unit))?/u.test(normalized);
-  const deniedDependency =
-    /(?:관련|연결|의존|dependency|relationship|relation)[^.!?]{0,20}(?:없|않|no|not)/u.test(normalized);
-  const negativeLead = /^(?:아니요|no)(?:\s|$)/u.test(normalized);
-  if (explicitNoImpact || independence || (deniedDependency && (negativeLead || !positiveImpact))) {
-    return "no-impact";
-  }
-  if (positiveImpact) return "impact";
+  const claims = polarityClaims(value);
+  const conflict = claims.some((left) => claims.some((right) =>
+    samePolarityScope(left, right) && (
+      (left.noImpactCue && right.impactOrDependencyCue) ||
+      (left.deniedDependency && right.positiveDependency)
+    )));
+  if (conflict) return "conflict";
+
+  const positive = claims.some(({ impactOrDependencyCue }) => impactOrDependencyCue);
+  if (positive) return "impact";
+  if (claims.some(({ noImpactCue, deniedDependency }) =>
+    noImpactCue || deniedDependency)) return "no-impact";
   return "unspecified";
+}
+
+function polarityClaims(value) {
+  let inheritedSubject = null;
+  return polarityClauses(value).map((clause) => {
+    const subject = polaritySubject(clause) ?? inheritedSubject;
+    if (subject) inheritedSubject = subject;
+    const normalized = normalizeSemanticText(clause);
+    const impactCues = semanticCueStates(clause, isImpactCueToken);
+    const dependencyCues = semanticCueStates(clause, (token) =>
+      /^(?:연결|의존|관계|connect|depend|dependency|relation|relationship)/u.test(token));
+    const independenceCues = semanticCueStates(clause, (token) =>
+      /^(?:별도|독립|separate|independent)/u.test(token));
+    const explicitNoImpact = impactCues.negated ||
+      /영향[^.!?]{0,20}(?:없|않)/u.test(normalized) ||
+      /(?:no|without)\s+(?:direct\s+)?impact/u.test(normalized);
+    const deniedDependency = dependencyCues.negated ||
+      /(?:관련|연결|의존|dependency|relationship|relation)[^.!?]{0,20}(?:없|않)/u.test(normalized) ||
+      /(?:no|not|without)\s+(?:direct\s+)?(?:connection|dependency|relationship|relation)/u.test(normalized);
+    const positiveDependency = hasAssertedDirectDependency(clause);
+    const noImpactCue = explicitNoImpact || independenceCues.asserted;
+    const impactOrDependencyCue = impactCues.asserted || positiveDependency;
+    return {
+      subject,
+      noImpactCue,
+      deniedDependency,
+      positiveDependency,
+      impactOrDependencyCue,
+    };
+  });
+}
+
+function polaritySubject(clause) {
+  const subjectSource = clause
+    .normalize("NFKC")
+    .replace(/^\s*(?:and|but|however|while|yet|그리고|그러나|하지만)\s+/iu, "");
+  const normalized = normalizeSemanticText(subjectSource);
+  const leadingIdentifier = technicalIdentifiers(subjectSource)
+    .find((identifier) => normalized.startsWith(normalizeSemanticText(identifier)));
+  if (leadingIdentifier) {
+    return canonicalPolaritySubject(semanticTokens(leadingIdentifier));
+  }
+
+  const tokens = semanticTokens(subjectSource);
+  const topicIndex = tokens.findIndex((token) =>
+    /^[a-z0-9가-힣]+(?:은|는|이|가)$/u.test(token));
+  const englishPredicateIndex = assertivePredicateContexts(subjectSource)
+    .flatMap(({ tokens: segmentTokens, predicateIndexes }) =>
+      predicateIndexes
+        .filter((predicateIndex) =>
+          ASSERTIVE_ENGLISH_FORM_SET.has(segmentTokens[predicateIndex]))
+        .map((predicateIndex) => ({ segmentTokens, predicateIndex })))
+    .at(0);
+  const subjectTokens = topicIndex > 0
+    ? tokens.slice(0, topicIndex + 1)
+    : englishPredicateIndex?.segmentTokens.slice(0, englishPredicateIndex.predicateIndex) ?? [];
+  const normalizedSubjectTokens = subjectTokens
+    .map((token) => koreanParticleForms(token).at(-1))
+    .filter((token) => !/^(?:a|an|the|directly|그리고|그러나|하지만)$/u.test(token));
+  if (/^(?:he|it|she|that|they|this|we|그것)$/u.test(normalizedSubjectTokens[0] ?? "")) {
+    return null;
+  }
+  if (normalizedSubjectTokens.length === 0) return null;
+  return canonicalPolaritySubject(normalizedSubjectTokens);
+}
+
+function canonicalPolaritySubject(tokens) {
+  const key = tokens
+    .map((token) => koreanParticleForms(token).at(-1))
+    .join("");
+  return key ? `subject:${key}` : null;
+}
+
+function samePolarityScope(left, right) {
+  return !left.subject || !right.subject || left.subject === right.subject;
+}
+
+function hasAssertedDirectDependency(value) {
+  return polarityClauses(value).some((clause) => {
+    const normalized = normalizeSemanticText(clause);
+    const tokens = semanticTokens(clause);
+    const sameRuntimeStart = findTokenSequence(tokens, ["same", "runtime", "unit"]);
+    const koreanRuntimeStart = findTokenSequence(tokens, ["같은", "실행", "단위"]);
+    if (
+      (sameRuntimeStart >= 0 &&
+        !tokenSequenceIsNegated(tokens, sameRuntimeStart, 3)) ||
+      (koreanRuntimeStart >= 0 &&
+        !tokenSequenceIsNegated(tokens, koreanRuntimeStart, 3))
+    ) {
+      return true;
+    }
+    if (!/(?:직접|direct)/u.test(normalized)) return false;
+    return semanticCueStates(clause, (token) =>
+      /^(?:연결|의존|관계|connect|depend|dependency|relation|relationship)/u.test(token))
+      .asserted;
+  });
+}
+
+function findTokenSequence(tokens, expected) {
+  for (let start = 0; start <= tokens.length - expected.length; start += 1) {
+    if (expected.every((token, offset) =>
+      koreanParticleForms(tokens[start + offset]).includes(token))) {
+      return start;
+    }
+  }
+  return -1;
+}
+
+function tokenSequenceIsNegated(tokens, start, length) {
+  return Array.from({ length }, (_, offset) => start + offset)
+    .some((index) => tokenIsNegated(tokens, index));
+}
+
+function isImpactCueToken(token, index, tokens) {
+  if (/^변경(?:하면|할|시)/u.test(token)) return false;
+  if (/^change/u.test(token) && tokens
+    .slice(Math.max(0, index - 2), index)
+    .some((value) => /^(?:if|when)$/u.test(value))) {
+    return false;
+  }
+  return /^(?:영향|달라|바꾸|변경|affect|impact|change)/u.test(token);
+}
+
+function semanticCueStates(value, matcher) {
+  let asserted = false;
+  let negated = false;
+  for (const clause of polarityClauses(value)) {
+    const tokens = semanticTokens(clause);
+    const assertive = clauseIsAssertive(clause);
+    for (const [index, token] of tokens.entries()) {
+      if (!matcher(token, index, tokens)) continue;
+      if (tokenIsNegated(tokens, index)) {
+        negated = true;
+      } else if (assertive) {
+        asserted = true;
+      }
+    }
+  }
+  return { asserted, negated };
+}
+
+function polarityClauses(value) {
+  return value
+    .normalize("NFKC")
+    .split(/[,.!?;]+|\b(?:but|while)\b/iu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
+function clauseIsAssertive(value) {
+  return assertivePredicateContexts(value)
+    .some(({ predicateIndexes }) => predicateIndexes.length > 0);
+}
+
+function assertivePredicateContexts(value) {
+  return value
+    .normalize("NFKC")
+    .split(/,+/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((text) => {
+      const tokens = semanticTokens(text);
+      return { text, tokens, predicateIndexes: assertivePredicateIndexes(tokens) };
+    });
+}
+
+function assertivePredicateIndexes(tokens) {
+  const indexes = [];
+  if (tokens.length > 1 && /[가-힣](?:다|요|지만)$/u.test(tokens.at(-1))) {
+    indexes.push(tokens.length - 1);
+  }
+  for (const [index, token] of tokens.entries()) {
+    if (
+      ASSERTIVE_ENGLISH_FORM_SET.has(token) &&
+      index > 0 &&
+      index < tokens.length - 1
+    ) {
+      indexes.push(index);
+    }
+  }
+  return indexes;
+}
+
+function attributedPredicateSegments(value, subjectAtoms) {
+  const attributed = assertivePredicateContexts(value).flatMap(({ text, tokens, predicateIndexes }) =>
+    predicateIndexes.flatMap((predicateIndex) => {
+      const prefixAtoms = semanticAtoms(tokens.slice(0, predicateIndex).join(" "));
+      const matched = matchSemanticAtoms(subjectAtoms, prefixAtoms);
+      return subjectAtoms.length > 0 &&
+        missingSemanticAtoms(subjectAtoms, matched).length === 0
+        ? [{ text, atoms: semanticAtoms(text) }]
+        : [];
+    }));
+  if (attributed.length > 0) return attributed;
+
+  const tokens = semanticTokens(value);
+  if (tokens.length <= 1 || !/[가-힣](?:다|요|지만)$/u.test(tokens.at(-1))) return [];
+  const prefixAtoms = semanticAtoms(tokens.slice(0, -1).join(" "));
+  const matched = matchSemanticAtoms(subjectAtoms, prefixAtoms);
+  return subjectAtoms.length > 0 &&
+    missingSemanticAtoms(subjectAtoms, matched).length === 0
+    ? [{ text: value, atoms: semanticAtoms(value) }]
+    : [];
 }
 
 function semanticAtoms(value) {
   const atoms = [];
-  for (const identifier of technicalIdentifiers(value)) {
-    atoms.push({
-      concept: `identifier:${identifier.normalize("NFKC").toLocaleLowerCase("und")}`,
-      kind: "entity",
-      surface: identifier,
-      negated: false,
-      identifierSubconcepts: identifierConcepts(identifier),
-    });
-  }
   const tokens = semanticTokens(value);
+  for (const identifier of technicalIdentifiers(value)) {
+    for (const negated of identifierNegationStates(tokens, identifier)) {
+      atoms.push({
+        concept: `identifier:${identifier.normalize("NFKC").toLocaleLowerCase("und")}`,
+        kind: "entity",
+        surface: identifier,
+        negated,
+        identifierSubconcepts: identifierConcepts(identifier),
+      });
+    }
+  }
   for (const [index, token] of tokens.entries()) {
     const definitions = definitionsForToken(token);
     if (definitions.length === 0) {
@@ -591,9 +848,26 @@ function semanticAtoms(value) {
   return [...unique.values()];
 }
 
+function identifierNegationStates(tokens, identifier) {
+  const identifierTokens = semanticTokens(identifier);
+  const states = [];
+  for (let start = 0; start <= tokens.length - identifierTokens.length; start += 1) {
+    const matches = identifierTokens.every((token, offset) =>
+      tokens[start + offset] === token);
+    if (!matches) continue;
+    states.push(identifierTokens.some((_, offset) =>
+      tokenIsNegated(tokens, start + offset)));
+  }
+  return states.length > 0 ? states : [false];
+}
+
 function tokenIsNegated(tokens, index) {
-  const window = tokens.slice(Math.max(0, index - 2), index + 4);
-  return window.some((value) => /^(?:않|없|아니|못|not|never|without)/u.test(value));
+  const prefix = tokens.slice(Math.max(0, index - 2), index + 1);
+  const koreanSuffix = tokens.slice(index + 1, index + 4);
+  return (
+    prefix.some((value) => /^(?:않|없|아닌|아니|못|not|never|without)/u.test(value)) ||
+    koreanSuffix.some((value) => /^(?:않|없|아닌|아니|못)/u.test(value))
+  );
 }
 
 function subjectAtomsForClaim(text, atoms) {
@@ -604,6 +878,24 @@ function subjectAtomsForClaim(text, atoms) {
     const concept = `identifier:${leadingIdentifier.normalize("NFKC").toLocaleLowerCase("und")}`;
     const identifierAtom = atoms.find((atom) => atom.concept === concept);
     return identifierAtom ? [identifierAtom] : [];
+  }
+  const tokens = semanticTokens(normalizedText);
+  const topicIndex = tokens.findIndex((token, index) =>
+    index < 6 && /^[a-z0-9가-힣]+(?:은|는|이|가)$/u.test(token));
+  const englishPredicate = assertivePredicateContexts(normalizedText)
+    .flatMap(({ tokens: segmentTokens, predicateIndexes }) =>
+      predicateIndexes
+        .filter((predicateIndex) =>
+          ASSERTIVE_ENGLISH_FORM_SET.has(segmentTokens[predicateIndex]))
+        .map((predicateIndex) => ({ segmentTokens, predicateIndex })))
+    .at(0);
+  const subjectTokens = topicIndex >= 0
+    ? tokens.slice(0, topicIndex + 1)
+    : englishPredicate?.segmentTokens.slice(0, englishPredicate.predicateIndex) ?? [];
+  if (subjectTokens.length > 0) {
+    const subjectEntity = semanticAtoms(subjectTokens.join(" "))
+      .find(({ kind }) => kind === "entity");
+    if (subjectEntity) return [subjectEntity];
   }
   const firstEntity = atoms.find(({ kind }) => kind === "entity");
   return firstEntity ? [firstEntity] : [];

@@ -56,7 +56,7 @@ Agent Context Candidate가 아니고 rollout하지 않는다.
 - graph answer time median: 36,840.065ms
 - `rg` answer time median: 33,217.775ms
 - median time reduction: -10.9% (graph arm이 더 느림)
-- adjudication SHA-256: `f3d9b86cde4792af752373ef2eb5e0829184259938c2006084a762591a968205`
+- adjudication SHA-256: `3cc28dbc73285f31862233ff1f95bb193830fce76334bf820cc00e425ec90103`
 
 ## 운영 정책
 
@@ -158,12 +158,14 @@ node scripts/understand-anything-pilot.mjs verify-artifact \
 claim group을 만든다. NFKC와 하나의 versioned 한국어/영어 software 용어 표를 적용한
 뒤, 각 group에서 action, order, quantifier, exclusivity atom은 전부, 나머지 고유 atom은
 3분의 2 이상 일치해야 한다. 선두 technical identifier 또는 첫 entity를 subject로
-고정하고 각 predicate는 그 subject가 있는 같은 answer clause 안에서만 인정한다. 명시적
-impact 또는 no-impact polarity와 모든 group이 통과해야 correct다. unknown, 끝이 물음표인 답,
-polarity 충돌, 핵심 atom 부정은 incorrect다.
+고정하고 각 predicate는 그 subject가 있는 같은 서술형 answer clause 안에서만 인정한다.
+주체가 명시적으로 부정되거나 predicate 없는 keyword 목록이면 incorrect다. 명시적
+같은 주체에 귀속된 impact 또는 direct dependency cue와 no-impact 또는 independent cue가
+함께 있으면 순서나 문장 경계와 무관하게 `conflict`로 fail-closed한다. unknown, 끝이 물음표인 답, polarity
+충돌, 핵심 atom 부정도 incorrect다. 모든 group과 polarity가 통과해야 correct다.
 
-semantic rule revision은 `expected-summary-subject-bound-claims-v1`, rule SHA-256은
-`eb83915274ded81b0664c8e0b9826eb7f002843b137754426d42f8a081ec12d4`이다.
+semantic rule revision은 `expected-summary-subject-bound-claims-v2`, rule SHA-256은
+`9054f2fb91ed817663bed7ec8700442fab71ac03ea864c888ce2cb83e77f135d`이다.
 scorer output contract는 v2다. 질문별 출력에는 expected clause, critical/soft atom,
 일치·누락 atom, 사용한 alias rule, 비교한 answer clause index, failure code를 남긴다.
 근거는 grounded raw evidence가 동결된 expected code와 test 항목을 모두 포함할 때만

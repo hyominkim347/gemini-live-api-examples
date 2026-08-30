@@ -136,7 +136,7 @@ test("a descriptive paraphrase of the expected impact is semantically correct", 
   assert.equal(result.questionScores[0].semanticCorrectness.correct, true);
   assert.equal(
     result.questionScores[0].semanticCorrectness.ruleRevision,
-    "expected-summary-subject-bound-claims-v1",
+    "expected-summary-subject-bound-claims-v2",
   );
   assert.match(result.questionScores[0].semanticCorrectness.ruleDigest, /^[a-f0-9]{64}$/);
 });
@@ -208,6 +208,122 @@ test("a different subject cannot inherit another component's apply behavior", as
   assert.ok(score.semanticCorrectness.failureCodes.includes("claim-group-mismatch"));
 });
 
+test("an explicitly negated subject cannot own the expected predicate", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "SpeechActivityDetector가 아니라 BrowserAudioPlayout이 발화 종료 판정과 자동 utterance boundary 변경의 영향을 받는다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores[0];
+
+  assert.equal(score.correct, false);
+  assert.ok(score.semanticCorrectness.failureCodes.includes("answer-contradictory"));
+  assert.ok(
+    score.semanticCorrectness.claimGroups[0].failureCodes
+      .includes("subject-atom-contradicted"),
+  );
+});
+
+test("a keyword list without an asserted subject-predicate relation is incorrect", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "SpeechActivityDetector 발화 utterance 종료 boundary 판정 automatic hold 변경 영향.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores[0];
+
+  assert.equal(score.correct, false);
+  assert.ok(
+    score.semanticCorrectness.claimGroups[0].failureCodes
+      .includes("predicate-attribution-missing"),
+  );
+});
+
+test("an inflected impact keyword cannot turn a list into a predicate", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "SpeechActivityDetector, 발화, 종료, 판정, 자동, utterance, boundary, impacts";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores[0];
+
+  assert.equal(score.correct, false);
+  assert.ok(
+    score.semanticCorrectness.claimGroups[0].failureCodes
+      .includes("predicate-attribution-missing"),
+  );
+});
+
+test("an inflected impact keyword between list items is not a predicate", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "SpeechActivityDetector, 발화, 종료, 판정, 자동, utterance, impacts, boundary";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores[0];
+
+  assert.equal(score.correct, false);
+  assert.ok(
+    score.semanticCorrectness.claimGroups[0].failureCodes
+      .includes("predicate-attribution-missing"),
+  );
+});
+
+test("an attributed predicate cannot borrow atoms from unrelated list segments", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "발화, 종료, 판정, 자동, utterance, SpeechActivityDetector impacts boundary";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores[0];
+
+  assert.equal(score.correct, false);
+  assert.ok(
+    score.semanticCorrectness.claimGroups[0].failureCodes
+      .includes("critical-atoms-missing"),
+  );
+});
+
 test("a negative-control paraphrase preserves the expected no-impact meaning", async () => {
   const input = await fixture();
   const raw = JSON.parse(input.rawText);
@@ -231,6 +347,242 @@ test("a negative-control paraphrase preserves the expected no-impact meaning", a
   assert.equal(score.semanticCorrectness.correct, true);
   assert.equal(score.semanticCorrectness.expectedPolarity, "no-impact");
   assert.equal(score.semanticCorrectness.answerPolarity, "no-impact");
+});
+
+test("mixed independence and direct-impact cues fail as an explicit polarity conflict", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-02",
+  );
+  answer.answer =
+    "Python Twilio 예제는 kr-ja-meeting의 LiveKit 및 Gemini socket 경로와 별도 실행 단위지만 직접 연결되어 영향을 받는다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+  assert.equal(score.correct, false);
+  assert.equal(score.semanticCorrectness.answerPolarity, "conflict");
+  assert.ok(score.semanticCorrectness.failureCodes.includes("polarity-conflict"));
+});
+
+test("polarity conflict detection is order and clause invariant in Korean and English", async () => {
+  const input = await fixture();
+  const answers = [
+    "Python Twilio 예제는 kr-ja-meeting에 직접 연결되어 영향을 받지만 별도 실행 단위다.",
+    "Python Twilio 예제는 kr-ja-meeting과 별도 실행 단위다. 그러나 직접 연결되어 영향을 받는다.",
+    "The Python Twilio example is an independent runtime unit, but it has a direct dependency on and impacts the kr-ja-meeting LiveKit and Gemini socket path.",
+  ];
+
+  for (const answerText of answers) {
+    const raw = JSON.parse(input.rawText);
+    const answer = raw.results.find(
+      ({ arm, questionId }) =>
+        arm === "understandAnythingGraph" && questionId === "negative-02",
+    );
+    answer.answer = answerText;
+    const rawText = JSON.stringify(raw);
+    const result = adjudicateAgentOnlyGate({
+      benchmarkText: input.benchmarkText,
+      rawText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: sha256(rawText),
+    });
+    const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+    assert.equal(score.correct, false, answerText);
+    assert.equal(score.semanticCorrectness.answerPolarity, "conflict", answerText);
+    assert.ok(
+      score.semanticCorrectness.failureCodes.includes("polarity-conflict"),
+      answerText,
+    );
+  }
+});
+
+test("polarity scoping does not depend on a frozen example name", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-02",
+  );
+  answer.answer =
+    "The Ruby Signal example is a separate runtime unit. It directly impacts the meeting socket path.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+  assert.equal(score.correct, false);
+  assert.equal(score.semanticCorrectness.answerPolarity, "conflict");
+});
+
+test("plural English subjects retain base-form impact polarity", async () => {
+  const input = await fixture();
+  const answers = [
+    "The Ruby Signal examples are independent runtime units. The Ruby Signal examples directly impact the meeting socket path.",
+    "The components are separate runtime units. They directly affect the meeting socket path.",
+    "The modules are independent runtime units. They directly change the meeting socket path.",
+    "The adapters are independent runtime units. They directly depend on the meeting socket path.",
+  ];
+
+  for (const answerText of answers) {
+    const raw = JSON.parse(input.rawText);
+    const answer = raw.results.find(
+      ({ arm, questionId }) =>
+        arm === "understandAnythingGraph" && questionId === "negative-02",
+    );
+    answer.answer = answerText;
+    const rawText = JSON.stringify(raw);
+    const result = adjudicateAgentOnlyGate({
+      benchmarkText: input.benchmarkText,
+      rawText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: sha256(rawText),
+    });
+    const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+    assert.equal(score.correct, false, answerText);
+    assert.equal(score.semanticCorrectness.answerPolarity, "conflict", answerText);
+  }
+});
+
+test("equivalent technical subject spellings share one polarity scope", async () => {
+  const input = await fixture();
+  const answers = [
+    "SpeechActivityDetector는 독립 실행 단위다. The speech activity detector directly impacts the meeting socket path.",
+    "The SpeechActivityDetector is an independent runtime unit. SpeechActivityDetector directly impacts the meeting socket path.",
+  ];
+
+  for (const answerText of answers) {
+    const raw = JSON.parse(input.rawText);
+    const answer = raw.results.find(
+      ({ arm, questionId }) =>
+        arm === "understandAnythingGraph" && questionId === "negative-02",
+    );
+    answer.answer = answerText;
+    const rawText = JSON.stringify(raw);
+    const result = adjudicateAgentOnlyGate({
+      benchmarkText: input.benchmarkText,
+      rawText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: sha256(rawText),
+    });
+    const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+    assert.equal(score.correct, false, answerText);
+    assert.equal(score.semanticCorrectness.answerPolarity, "conflict", answerText);
+  }
+});
+
+test("renamed unrelated subjects do not create a polarity conflict", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-02",
+  );
+  answer.answer =
+    "The Ruby Signal example is a separate runtime unit. The Quartz Relay example directly impacts the meeting socket path.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+  assert.equal(score.correct, false);
+  assert.equal(score.semanticCorrectness.answerPolarity, "impact");
+});
+
+test("a negated dependency does not erase an asserted independence conflict", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-02",
+  );
+  answer.answer =
+    "The Python Twilio example is separate, not connected, but directly impacts kr-ja-meeting.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+  assert.equal(score.correct, false);
+  assert.equal(score.semanticCorrectness.answerPolarity, "conflict");
+  assert.ok(score.semanticCorrectness.failureCodes.includes("polarity-conflict"));
+});
+
+test("a negated same-runtime claim is not a positive dependency", async () => {
+  const input = await fixture();
+  const answers = [
+    "Python Twilio 예제는 kr-ja-meeting과 같은 실행 단위가 아니다.",
+    "The Python Twilio example is not the same runtime unit as kr-ja-meeting.",
+  ];
+
+  for (const answerText of answers) {
+    const raw = JSON.parse(input.rawText);
+    const answer = raw.results.find(
+      ({ arm, questionId }) =>
+        arm === "understandAnythingGraph" && questionId === "negative-02",
+    );
+    answer.answer = answerText;
+    const rawText = JSON.stringify(raw);
+    const result = adjudicateAgentOnlyGate({
+      benchmarkText: input.benchmarkText,
+      rawText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: sha256(rawText),
+    });
+    const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+    assert.notEqual(score.semanticCorrectness.answerPolarity, "impact", answerText);
+  }
+});
+
+test("negated independence cannot override a direct dependency and impact", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-02",
+  );
+  answer.answer =
+    "Python Twilio example is not separate from kr-ja-meeting LiveKit and Gemini socket runtime. It has a direct dependency and impact.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+  assert.equal(score.correct, false);
+  assert.equal(score.semanticCorrectness.answerPolarity, "impact");
+  assert.ok(score.semanticCorrectness.failureCodes.includes("polarity-mismatch"));
 });
 
 test("an unrelated impact assertion is semantically incorrect", async () => {
@@ -321,6 +673,51 @@ test("a scoped missing graph relation does not negate a positive impact claim", 
 
   assert.equal(result.questionScores[0].correct, true);
   assert.equal(result.questionScores[0].semanticCorrectness.answerPolarity, "impact");
+});
+
+test("an unrelated denied dependency does not conflict with a scoped direct dependency", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "SpeechActivityDetector의 발화 종료 판정과 자동 utterance boundary가 MeetingSession에 직접 의존해 영향을 받는다. BrowserAudioPlayout과는 연결 관계가 없다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].semanticCorrectness.answerPolarity, "impact");
+});
+
+test("subject scope survives comma-coordinated unrelated denials", async () => {
+  const input = await fixture();
+  const answers = [
+    "SpeechActivityDetector의 발화 종료 판정과 자동 utterance boundary가 MeetingSession에 직접 의존해 영향을 받지만, BrowserAudioPlayout과는 연결 관계가 없다.",
+    "SpeechActivityDetector directly depends on MeetingSession and impacts the automatic utterance boundary, while BrowserAudioPlayout has no relation to it.",
+  ];
+
+  for (const answerText of answers) {
+    const raw = JSON.parse(input.rawText);
+    const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+    answer.answer = answerText;
+    const rawText = JSON.stringify(raw);
+    const result = adjudicateAgentOnlyGate({
+      benchmarkText: input.benchmarkText,
+      rawText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: sha256(rawText),
+    });
+
+    assert.equal(
+      result.questionScores[0].semanticCorrectness.answerPolarity,
+      "impact",
+      answerText,
+    );
+  }
 });
 
 test("NFKC normalization and reordered explanation preserve the same claim", async () => {
