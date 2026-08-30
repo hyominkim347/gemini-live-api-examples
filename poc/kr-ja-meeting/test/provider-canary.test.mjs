@@ -5,7 +5,11 @@ import {
   GEMINI_INPUT_SAMPLE_RATE,
   ProviderCanaryEvidence,
   ProviderSemanticEvidence,
+  evaluateProviderSemanticTrial,
+  providerSemanticFixtures,
+  providerSemanticStreamPlan,
   publicationName,
+  semanticStreamSettled,
 } from "../src/provider-canary.mjs";
 
 test("the provider canary sends Live Translate audio at 16 kHz", () => {
@@ -106,4 +110,50 @@ test("provider semantic evidence fails closed for duplicates, missing trials, or
     firstMeaning: true,
     lastMeaning: true,
   }), /unsupported semantic direction/);
+});
+
+test("provider semantic canary uses continuous streaming and a quiet transcription boundary", () => {
+  assert.deepEqual(providerSemanticStreamPlan(), {
+    automaticActivityDetection: true,
+    leadingSilenceMilliseconds: 1_000,
+    trailingSilenceMilliseconds: 2_000,
+    transcriptionQuietMilliseconds: 2_000,
+    transcriptionTimeoutMilliseconds: 12_000,
+  });
+  assert.equal(semanticStreamSettled({
+    inputEvents: 1,
+    outputEvents: 1,
+    lastTranscriptionAt: 1_000,
+    now: 2_999,
+    quietMilliseconds: 2_000,
+  }), false);
+  assert.equal(semanticStreamSettled({
+    inputEvents: 1,
+    outputEvents: 1,
+    lastTranscriptionAt: 1_000,
+    now: 3_000,
+    quietMilliseconds: 2_000,
+  }), true);
+});
+
+test("provider semantic fixtures disambiguate source meaning and accept equivalent target wording", () => {
+  const fixtures = providerSemanticFixtures();
+  const koToJa = fixtures.find(({ id }) => id === "ko-to-ja-1");
+  const koToJaSeoul = fixtures.find(({ id }) => id === "ko-to-ja-2");
+  const koToJaSpring = fixtures.find(({ id }) => id === "ko-to-ja-3");
+  const jaToKo = fixtures.find(({ id }) => id === "ja-to-ko-1");
+
+  assert.match(koToJa.spoken, /사과 과일/);
+  assert.match(koToJaSeoul.spoken, /서울.*밤하늘의 별/);
+  assert.match(koToJaSpring.spoken, /봄 계절/);
+  assert.deepEqual(evaluateProviderSemanticTrial({
+    fixture: koToJa,
+    input: "빨간 사과 과일로 시작합니다. 기차로 마칩니다.",
+    output: "赤い林檎から始めます。電車で終わります。",
+  }), { firstMeaning: true, lastMeaning: true });
+  assert.deepEqual(evaluateProviderSemanticTrial({
+    fixture: jaToKo,
+    input: "りんごから始めます。電車で終わります。",
+    output: "사과로 시작합니다. 전철로 마칩니다.",
+  }), { firstMeaning: true, lastMeaning: true });
 });
