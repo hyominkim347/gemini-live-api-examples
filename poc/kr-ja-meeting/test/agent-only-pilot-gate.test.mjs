@@ -95,10 +95,11 @@ test("a frozen, grounded Agent Lane result records Agent Context Candidate", asy
   });
 
   assert.equal(result.resultRouting, "Agent Context Candidate");
+  assert.equal(result.contractVersion, 2);
   assert.deepEqual(result.scorer, {
-    revision: "agent-only-gate-v2",
+    revision: "agent-only-gate-v3",
     inputContractVersion: 1,
-    outputContractVersion: 1,
+    outputContractVersion: 2,
   });
   assert.deepEqual(result.failures, []);
   assert.deepEqual(result.metrics, {
@@ -114,6 +115,255 @@ test("a frozen, grounded Agent Lane result records Agent Context Candidate", asy
     "poc/kr-ja-meeting/src/speech-activity-detector.mjs#SpeechActivityDetector",
   ]);
   assert.deepEqual(result.questionScores[0].missingTestEvidence, []);
+});
+
+test("a descriptive paraphrase of the expected impact is semantically correct", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "침묵 hold 시간 변경은 SpeechActivityDetector의 발화 종료 판정 시점과 자동 utterance boundary를 직접 바꾼다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].correct, true);
+  assert.equal(result.questionScores[0].semanticCorrectness.correct, true);
+  assert.equal(
+    result.questionScores[0].semanticCorrectness.ruleRevision,
+    "expected-summary-subject-bound-claims-v1",
+  );
+  assert.match(result.questionScores[0].semanticCorrectness.ruleDigest, /^[a-f0-9]{64}$/);
+});
+
+test("keyword coverage cannot hide a negated critical claim", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "Speech Activity Detector utterance 종료 자동 boundary. 판정은 하지 않는다. 이 변경은 영향을 준다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].correct, false);
+  assert.ok(
+    result.questionScores[0].semanticCorrectness.failureCodes.includes("answer-contradictory"),
+  );
+});
+
+test("a negated keep claim cannot satisfy the expected cross-layer behavior", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "cross-01",
+  );
+  answer.answer =
+    "BrowserMeetingService가 utterance를 유지하지 않는다. GeminiLiveTranslateSocket의 handle을 제거하고 정확히 한 번 재시도한다. 관련 회의 cleanup 경로가 영향을 받는다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "cross-01");
+
+  assert.equal(score.correct, false);
+  assert.ok(score.semanticCorrectness.failureCodes.includes("answer-contradictory"));
+});
+
+test("a different subject cannot inherit another component's apply behavior", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "cross-02",
+  );
+  answer.answer =
+    "MeetingSession이 참가자별 listening mode를 복귀시키고 track 및 gain 계획을 적용한다. BrowserAudioPlayout도 이 변경의 영향을 받는다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "cross-02");
+
+  assert.equal(score.correct, false);
+  assert.ok(score.semanticCorrectness.failureCodes.includes("claim-group-mismatch"));
+});
+
+test("a negative-control paraphrase preserves the expected no-impact meaning", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-01",
+  );
+  answer.answer =
+    "아니요. command-line Node 예제는 kr-ja-meeting과 연결 관계가 없고 별도 실행된다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-01");
+
+  assert.equal(score.correct, true);
+  assert.equal(score.semanticCorrectness.correct, true);
+  assert.equal(score.semanticCorrectness.expectedPolarity, "no-impact");
+  assert.equal(score.semanticCorrectness.answerPolarity, "no-impact");
+});
+
+test("an unrelated impact assertion is semantically incorrect", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer = "BrowserAudioPlayout의 track 및 gain 계획이 직접 영향을 받는다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].correct, false);
+  assert.ok(
+    result.questionScores[0].semanticCorrectness.failureCodes.includes("claim-group-mismatch"),
+  );
+});
+
+test("audio and text does not satisfy the expected audio-only contract", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "direct-03",
+  );
+  answer.answer = input.benchmark.questions
+    .find(({ id }) => id === "direct-03")
+    .expectedAnswer.summary.replace("audio-only", "audio and text");
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "direct-03");
+
+  assert.equal(score.correct, false);
+  assert.deepEqual(
+    score.semanticCorrectness.claimGroups[0].missingCriticalAtoms.map(({ concept }) => concept),
+    ["only"],
+  );
+});
+
+test("a positive dependency assertion fails a no-impact negative control", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(
+    ({ arm, questionId }) =>
+      arm === "understandAnythingGraph" && questionId === "negative-02",
+  );
+  answer.answer =
+    "Python Twilio 예제는 kr-ja-meeting의 LiveKit 및 Gemini socket과 같은 실행 단위이고 직접 연결되어 영향을 준다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+  const score = result.questionScores.find(({ questionId }) => questionId === "negative-02");
+
+  assert.equal(score.correct, false);
+  assert.equal(score.semanticCorrectness.expectedPolarity, "no-impact");
+  assert.equal(score.semanticCorrectness.answerPolarity, "impact");
+});
+
+test("a scoped missing graph relation does not negate a positive impact claim", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "SpeechActivityDetector의 발화 종료 판정과 자동 utterance boundary가 직접 달라진다. 추가 하위 symbol 관계는 없다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].correct, true);
+  assert.equal(result.questionScores[0].semanticCorrectness.answerPolarity, "impact");
+});
+
+test("NFKC normalization and reordered explanation preserve the same claim", async () => {
+  const input = await fixture();
+  const raw = JSON.parse(input.rawText);
+  const answer = raw.results.find(({ arm }) => arm === "understandAnythingGraph");
+  answer.answer =
+    "추가 설명이다. 자동 utterance boundary와 발화 종료 판정 시점은 ＳｐｅｅｃｈＡｃｔｉｖｉｔｙＤｅｔｅｃｔｏｒ 변경으로 직접 달라진다.";
+  const rawText = JSON.stringify(raw);
+
+  const result = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: sha256(rawText),
+  });
+
+  assert.equal(result.questionScores[0].correct, true);
+});
+
+test("semantic correctness does not depend on a question id", async () => {
+  const input = await fixture();
+  const original = adjudicateAgentOnlyGate({
+    benchmarkText: input.benchmarkText,
+    rawText: input.rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: input.expectedRawSha256,
+  });
+  const renamedBenchmark = structuredClone(input.benchmark);
+  renamedBenchmark.questions[0].id = "renamed-direct-question";
+  const renamedBenchmarkText = JSON.stringify(renamedBenchmark);
+  const renamedRawText = JSON.stringify(passingRaw(renamedBenchmark));
+  const renamed = adjudicateAgentOnlyGate({
+    benchmarkText: renamedBenchmarkText,
+    rawText: renamedRawText,
+    expectedBenchmarkSha256: sha256(renamedBenchmarkText),
+    expectedRawSha256: sha256(renamedRawText),
+  });
+
+  assert.deepEqual(
+    renamed.questionScores[0].semanticCorrectness,
+    original.questionScores[0].semanticCorrectness,
+  );
 });
 
 test("grounded but unrelated evidence does not satisfy the frozen evidence gate", async () => {
@@ -163,7 +413,8 @@ test("opposite meaning is incorrect even when frozen evidence is complete", asyn
   assert.equal(result.metrics.evidencedAnswers, 12);
   assert.equal(result.questionScores[0].correct, false);
   assert.equal(result.questionScores[0].evidenced, true);
-  assert.equal(result.questionScores[0].meaningMatched, false);
+  assert.equal(result.questionScores[0].semanticCorrectness.correct, false);
+  assert.ok(result.questionScores[0].semanticCorrectness.failureCodes.includes("polarity-mismatch"));
 });
 
 test("meaning-changing punctuation is not normalized into a correct assertion", async () => {
@@ -180,7 +431,7 @@ test("meaning-changing punctuation is not normalized into a correct assertion", 
     expectedRawSha256: sha256(rawText),
   });
 
-  assert.equal(result.questionScores[0].meaningMatched, false);
+  assert.equal(result.questionScores[0].semanticCorrectness.correct, false);
   assert.equal(result.questionScores[0].correct, false);
   assert.equal(result.questionScores[0].evidenced, true);
 });
@@ -304,6 +555,12 @@ test("the frozen AIN-7643 raw artifact deterministically activates the Stop Rule
     expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
     expectedRawSha256: FROZEN_RAW_RESULTS_SHA256,
   });
+  const repeated = adjudicateAgentOnlyGate({
+    benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: FROZEN_RAW_RESULTS_SHA256,
+  });
 
   assert.deepEqual(verified.provenance, {
     mode: "frozen-digest-provenance-v1",
@@ -317,11 +574,21 @@ test("the frozen AIN-7643 raw artifact deterministically activates the Stop Rule
     completedRuns: 24,
   });
   assert.equal(result.resultRouting, "Stop Rule");
-  assert.equal(result.metrics.correctAnswers, 0);
+  assert.equal(result.metrics.correctAnswers, 5);
   assert.equal(result.metrics.evidencedAnswers, 0);
   assert.equal(result.metrics.inventedFiles, 0);
   assert.equal(result.metrics.inventedRelations, 0);
   assert.equal(result.metrics.graphMedianMs, 36_840.065);
   assert.equal(result.metrics.repositorySearchMedianMs, 33_217.775);
   assert.equal(result.metrics.medianTimeReduction, -0.109);
+  assert.deepEqual(
+    result.questionScores.filter(({ correct }) => correct).map(({ questionId }) => questionId),
+    ["direct-01", "direct-02", "cross-02", "negative-01", "negative-02"],
+  );
+  assert.deepEqual(repeated, result);
+  const retryAudit = result.questionScores
+    .find(({ questionId }) => questionId === "cross-01")
+    .semanticCorrectness.claimGroups[1].criticalAtoms;
+  assert.ok(retryAudit.some(({ concept, surface }) => concept === "retry" && surface === "재시도"));
+  assert.ok(retryAudit.every(({ surface }) => surface !== "재시"));
 });

@@ -43,16 +43,20 @@ Agent Lane은 다음 네 조건을 모두 충족해야 한다.
 
 하나라도 충족하지 못하면 Stop Rule을 적용한다. 결과를 확인한 뒤 threshold, expected answer, evidence criteria, raw result를 완화하거나 변경하지 않는다.
 
-현재 동결 결과에서는 Stop Rule이 적용되었다. AIN-7644의 최종 판정은 다음 측정값을
-그대로 기록하며, 이 도구는 Agent Context Candidate가 아니고 rollout하지 않는다.
+현재 동결 결과에서는 Stop Rule이 적용되었다. AIN-7644의 최초 `agent-only-gate-v2`
+기록은 summary의 NFKC exact string만 비교해 correct answer를 0/12로 기록한 historical
+evidence다. 동결 benchmark, raw result, threshold는 바꾸지 않고 의미 비교 계약을
+`agent-only-gate-v3`로 교정해 다시 판정했다. 교정 결과는 다음 측정값이며, 이 도구는
+Agent Context Candidate가 아니고 rollout하지 않는다.
 
-- correct answer: 0/12
+- correct answer: 5/12 (`direct-01`, `direct-02`, `cross-02`, `negative-01`, `negative-02`)
 - verified code/test evidence: 0/12
 - invented file: 0
 - invented relation: 0
 - graph answer time median: 36,840.065ms
 - `rg` answer time median: 33,217.775ms
 - median time reduction: -10.9% (graph arm이 더 느림)
+- adjudication SHA-256: `f3d9b86cde4792af752373ef2eb5e0829184259938c2006084a762591a968205`
 
 ## 운영 정책
 
@@ -149,11 +153,22 @@ node scripts/understand-anything-pilot.mjs verify-artifact \
 로, AIN-7643 raw result bytes의 SHA-256을
 `6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0`로 고정한다.
 정답은 raw answer의 의미가 동결된 `expectedAnswer.summary`와 일치하는지로 판정하고,
-근거 충족 여부와 독립적으로 센다. 근거는 grounded raw evidence가 동결된 expected code와
-test 항목을 모두 포함할 때만 충족된다. `unsupported`, `unknown`, unverified, invented
-evidence는 evidence gate에 유리하게 계산하지 않는다. scorer revision은
-`agent-only-gate-v2`이다. 출력에는 해당 revision, input/output contract revision,
-질문별 의미 일치와 일치·누락된 동결 code/test evidence를 기록한다.
+근거 충족 여부와 독립적으로 센다. `agent-only-gate-v3`는 question ID나 actual 결과별
+예외 없이 expected summary에서 문장·쉼표와 새 technical subject 앞의 접속 조사 단위로
+claim group을 만든다. NFKC와 하나의 versioned 한국어/영어 software 용어 표를 적용한
+뒤, 각 group에서 action, order, quantifier, exclusivity atom은 전부, 나머지 고유 atom은
+3분의 2 이상 일치해야 한다. 선두 technical identifier 또는 첫 entity를 subject로
+고정하고 각 predicate는 그 subject가 있는 같은 answer clause 안에서만 인정한다. 명시적
+impact 또는 no-impact polarity와 모든 group이 통과해야 correct다. unknown, 끝이 물음표인 답,
+polarity 충돌, 핵심 atom 부정은 incorrect다.
+
+semantic rule revision은 `expected-summary-subject-bound-claims-v1`, rule SHA-256은
+`eb83915274ded81b0664c8e0b9826eb7f002843b137754426d42f8a081ec12d4`이다.
+scorer output contract는 v2다. 질문별 출력에는 expected clause, critical/soft atom,
+일치·누락 atom, 사용한 alias rule, 비교한 answer clause index, failure code를 남긴다.
+근거는 grounded raw evidence가 동결된 expected code와 test 항목을 모두 포함할 때만
+충족된다. `unsupported`, `unknown`, unverified, invented evidence는 evidence gate에
+유리하게 계산하지 않는다.
 
 ```bash
 # 위 graph adapter와 같은 package cwd에서 실행한다.
