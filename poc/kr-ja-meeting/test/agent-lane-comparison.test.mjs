@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -13,11 +14,15 @@ import {
   validateComparisonPlanControls,
   validateComparisonPlanSeal,
   validateCurrentComparisonMaterials,
+  verifyAgentComparison,
   verifyRawAnswer,
 } from "../scripts/agent-lane-comparison.mjs";
 import { digestMaterialRoot } from "../scripts/pilot-local-safety.mjs";
 
 const SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
+const frozenLegacyRawPath = process.env.UA_AGENT_RAW_RESULTS_PATH ??
+  "/private/tmp/ua-agent-comparison/.ua-pilot/agent-lane-comparison/raw-results.json";
+const frozenLegacyOutput = resolve(frozenLegacyRawPath, "..");
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -94,6 +99,36 @@ test("the frozen twelve questions use the crossed Agent Lane order without score
   ]);
   assert.ok(runs.every((run) => run.timeoutMs === 123_000));
   assert.doesNotMatch(JSON.stringify({ questions, runs }), /expectedAnswer|passGate|minimumCorrect|scorer/);
+});
+
+test("the exact frozen legacy comparison verifies read-only without a modern seal", {
+  skip: !existsSync(frozenLegacyRawPath),
+}, async () => {
+  const before = await readFile(frozenLegacyRawPath, "utf8");
+  const verified = await verifyAgentComparison({ outputDir: frozenLegacyOutput });
+
+  assert.equal(verified.provenanceMode, "frozen-digest-provenance-v1");
+  assert.equal(verified.completedRuns, 24);
+  assert.equal(
+    verified.rawResultsSha256,
+    "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0",
+  );
+  assert.equal(await readFile(frozenLegacyRawPath, "utf8"), before);
+});
+
+test("a seal-less arbitrary legacy directory is rejected instead of entering compatibility mode", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "ua-arbitrary-legacy-"));
+  const outputDir = resolve(root, ".ua-pilot", "agent-lane-comparison");
+  try {
+    await mkdir(outputDir, { recursive: true });
+    await writeFile(resolve(outputDir, "raw-results.json"), "{}\n", "utf8");
+    await assert.rejects(
+      verifyAgentComparison({ outputDir }),
+      /frozen|digest mismatch/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("prepared comparison controls reject a changed run path and plan bytes", async () => {
@@ -282,7 +317,7 @@ test("each arm prompt contains only its question and material contract", () => {
   assert.doesNotMatch(rgPrompt, /knowledge-graph|expectedAnswer|score|previous answer/i);
 });
 
-test("fresh invocations use the current Codex provider, read-only sandbox, and no resume", () => {
+test("fresh invocations use the current Codex material-only profile and no resume", () => {
   const args = buildCodexExecArgs({
     materialRoot: "/tmp/material",
     schemaPath: "/tmp/schema.json",

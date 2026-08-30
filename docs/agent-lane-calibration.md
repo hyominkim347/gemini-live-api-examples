@@ -1,17 +1,19 @@
 # Agent Lane 비채점 calibration
 
 AIN-7641은 12문항 Paired Comparison 전에 비채점 Agent Lane calibration 1개를
-추가한다. AIN-7639가 생성한 고정 로컬 graph를 재사용하며 Impact Benchmark 실행을
-생성하거나 읽거나 채점하지 않는다.
+추가한다. 이 단계는 Impact Benchmark 실행을 생성하거나 읽거나 채점하지 않는다.
 
 ## 실행
 
-AIN-7639 Pilot Artifact를 read-only input으로 사용하고 이번 실행의 출력은 ignored 로컬
-디렉터리 아래에 둔다.
+기존 AIN-7639 historical retained evidence는 재사용하지 않는다. 로컬 graph adapter
+runbook의 `prepare`부터 새 artifact root를 만들고 full analysis, Incremental Refresh,
+inventory와 artifact verification을 끝낸다. 이렇게 검증된 새 Pilot Artifact만 read-only
+input으로 사용하고 calibration 출력은 ignored 로컬 디렉터리 아래에 둔다. Provider 실행
+전제는 `macOS arm64`와 정확히 Codex `0.151.0`이며, 다른 runtime은 fail-closed다.
 
 ```bash
 node poc/kr-ja-meeting/scripts/agent-lane-calibration.mjs run \
-  --pilot-artifact-root .ua-pilot/pilot-run \
+  --pilot-artifact-root .ua-pilot/pilot-run-NEW \
   --output-dir .ua-pilot/agent-lane-calibration
 ```
 
@@ -21,7 +23,9 @@ node poc/kr-ja-meeting/scripts/agent-lane-calibration.mjs run \
 
 - fresh context를 위한 `--ephemeral`
 - alternate provider profile 선택을 막는 `--ignore-user-config`
-- Analysis Snapshot에 대한 `--sandbox read-only`
+- `default_permissions="ua_pilot_material_only"`와 material root `read`만 허용하는
+  filesystem profile
+- `network={enabled=false}`, `approval_policy="never"`, shell environment inherit 차단
 - 비채점 calibration 질문만 포함한 output schema
 
 timer는 provider invocation 직전에 시작하고 schema를 준수한 final answer가 기록되면

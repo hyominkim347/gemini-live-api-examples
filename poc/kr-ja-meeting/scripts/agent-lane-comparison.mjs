@@ -12,6 +12,9 @@ import {
   loadCurrentPilotArtifact,
 } from "./understand-anything-pilot.mjs";
 import {
+  verifyFrozenAgentOnlyInputs,
+} from "../src/agent-only-pilot-gate.mjs";
+import {
   buildCodexPermissionConfig,
   copyTrackedCorpus,
   copyRegularFileWithin,
@@ -117,6 +120,21 @@ async function regularFile(path) {
     if (error.code === "ENOENT") return false;
     throw error;
   }
+}
+
+async function optionalRegularPilotFile(root, relativePath, label) {
+  const path = resolvePilotChildPath(root, relativePath, label);
+  let fileStat;
+  try {
+    fileStat = await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular non-symlink file`);
+  }
+  return readRegularPilotFile(root, relativePath, label);
 }
 
 function sha256(text) {
@@ -593,11 +611,37 @@ async function loadComparison(outputDir, pilotArtifactRoot) {
     outputDir,
     "Agent Lane Paired Comparison output",
   );
-  const [planFile, sealFile, schemaFile, benchmarkText, currentInputs] = await Promise.all([
-    readRegularPilotFile(resultRoot, "raw-comparison-plan.json", "raw comparison plan"),
-    readRegularPilotFile(resultRoot, "raw-comparison-seal.json", "raw comparison seal"),
-    readRegularPilotFile(resultRoot, "raw-answer.schema.json", "raw answer schema"),
+  const [sealFile, benchmarkText] = await Promise.all([
+    optionalRegularPilotFile(
+      resultRoot,
+      "raw-comparison-seal.json",
+      "raw comparison seal",
+    ),
     readFile(DEFAULT_BENCHMARK_PATH, "utf8"),
+  ]);
+  if (!sealFile) {
+    const rawFile = await readRegularPilotFile(
+      resultRoot,
+      "raw-results.json",
+      "frozen Agent Lane raw artifact",
+    );
+    const verified = verifyFrozenAgentOnlyInputs({
+      benchmarkText,
+      rawText: rawFile.text,
+    });
+    return {
+      mode: "frozen-legacy",
+      resultRoot,
+      aggregate: verified.raw,
+      provenance: verified.provenance,
+    };
+  }
+  if (!pilotArtifactRoot) {
+    throw new Error("--pilot-artifact-root is required for sealed comparison verification");
+  }
+  const [planFile, schemaFile, currentInputs] = await Promise.all([
+    readRegularPilotFile(resultRoot, "raw-comparison-plan.json", "raw comparison plan"),
+    readRegularPilotFile(resultRoot, "raw-answer.schema.json", "raw answer schema"),
     loadCurrentPilotArtifact(pilotArtifactRoot),
   ]);
   const anchoredMaterialDigests = await trustedMaterialDigests(currentInputs);
@@ -636,6 +680,7 @@ async function loadComparison(outputDir, pilotArtifactRoot) {
     anchoredMaterialDigests,
   );
   return {
+    mode: "sealed-current",
     resultRoot,
     plan,
     materialRoots,
@@ -755,8 +800,12 @@ export async function runAgentComparison({
   pilotArtifactRoot,
   outputDir,
 }) {
+  const loaded = await loadComparison(outputDir, pilotArtifactRoot);
+  if (loaded.mode === "frozen-legacy") {
+    throw new Error("Frozen legacy Agent comparison evidence is read-only; use verify");
+  }
   const codexIdentity = await resolveTrustedCodexIdentity();
-  const { resultRoot, plan, schemaPath } = await loadComparison(outputDir, pilotArtifactRoot);
+  const { resultRoot, plan, schemaPath } = loaded;
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
   for (const run of plan.runs) {
@@ -846,7 +895,17 @@ export async function runAgentComparison({
 }
 
 export async function verifyAgentComparison({ pilotArtifactRoot, outputDir }) {
-  const { resultRoot, plan } = await loadComparison(outputDir, pilotArtifactRoot);
+  const loaded = await loadComparison(outputDir, pilotArtifactRoot);
+  if (loaded.mode === "frozen-legacy") {
+    return {
+      outputDir: loaded.resultRoot,
+      completedRuns: loaded.aggregate.completedRuns,
+      provenanceMode: loaded.provenance.mode,
+      benchmarkSha256: loaded.provenance.benchmarkSha256,
+      rawResultsSha256: loaded.provenance.rawResultsSha256,
+    };
+  }
+  const { resultRoot, plan } = loaded;
   const questionById = new Map(plan.questions.map((question) => [question.id, question]));
   const results = [];
   for (const run of plan.runs) {
@@ -875,8 +934,11 @@ async function main() {
   const options = parseOptions(args, new Set([
     "pilot-artifact-root", "output-dir", "timeout-ms",
   ]));
-  if (!options["pilot-artifact-root"] || !options["output-dir"]) {
-    throw new Error("--pilot-artifact-root and --output-dir are required");
+  if (!options["output-dir"]) {
+    throw new Error("--output-dir is required");
+  }
+  if (["prepare", "run"].includes(command) && !options["pilot-artifact-root"]) {
+    throw new Error(`--pilot-artifact-root is required for ${command}`);
   }
   if (command === "prepare") {
     const prepared = await prepareAgentComparison({

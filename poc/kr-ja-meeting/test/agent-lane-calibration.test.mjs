@@ -219,7 +219,7 @@ test("insufficient evidence is reported as unknown instead of guessed", async ()
   assert.deepEqual(report.errors, []);
 });
 
-test("fresh context invocation keeps the current OpenAI Codex provider and read-only snapshot", () => {
+test("fresh context invocation keeps the current OpenAI Codex material-only profile", () => {
   const args = buildCodexExecArgs({
     snapshotRoot: "/tmp/analysis-snapshot",
     schemaPath: "/tmp/answer.schema.json",

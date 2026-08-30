@@ -18,12 +18,12 @@ export function adjudicateAgentOnlyGate({
   expectedBenchmarkSha256 = FROZEN_BENCHMARK_SHA256,
   expectedRawSha256 = FROZEN_RAW_RESULTS_SHA256,
 }) {
-  requireDigest(benchmarkText, expectedBenchmarkSha256, "Frozen Impact Benchmark");
-  requireDigest(rawText, expectedRawSha256, "Agent Lane raw artifact");
-
-  const benchmark = parseJson(benchmarkText, "Frozen Impact Benchmark");
-  const raw = parseJson(rawText, "Agent Lane raw artifact");
-  validateInputs(benchmark, raw);
+  const { benchmark, raw } = verifyAgentOnlyInputs({
+    benchmarkText,
+    rawText,
+    expectedBenchmarkSha256,
+    expectedRawSha256,
+  });
 
   const graphByQuestion = armByQuestion(raw.results, GRAPH_ARM);
   const rgByQuestion = armByQuestion(raw.results, RG_ARM);
@@ -85,6 +85,48 @@ export function adjudicateAgentOnlyGate({
       medianTimeReduction,
     },
     questionScores,
+  };
+}
+
+export function verifyFrozenAgentOnlyInputs({
+  benchmarkText,
+  rawText,
+}) {
+  return verifyAgentOnlyInputs({
+    benchmarkText,
+    rawText,
+    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    expectedRawSha256: FROZEN_RAW_RESULTS_SHA256,
+  });
+}
+
+function verifyAgentOnlyInputs({
+  benchmarkText,
+  rawText,
+  expectedBenchmarkSha256,
+  expectedRawSha256,
+}) {
+  requireDigest(benchmarkText, expectedBenchmarkSha256, "Frozen Impact Benchmark");
+  requireDigest(rawText, expectedRawSha256, "Agent Lane raw artifact");
+
+  const benchmark = parseJson(benchmarkText, "Frozen Impact Benchmark");
+  const raw = parseJson(rawText, "Agent Lane raw artifact");
+  validateInputs(benchmark, raw);
+
+  return {
+    benchmark,
+    raw,
+    provenance: {
+      mode: "frozen-digest-provenance-v1",
+      benchmarkSha256: expectedBenchmarkSha256,
+      rawResultsSha256: expectedRawSha256,
+      benchmarkRevision: benchmark.revision,
+      analysisSnapshot: benchmark.analysisSnapshot,
+      provider: raw.provider,
+      orderPolicy: raw.orderPolicy,
+      timeoutMs: raw.timeoutMs,
+      completedRuns: raw.completedRuns,
+    },
   };
 }
 

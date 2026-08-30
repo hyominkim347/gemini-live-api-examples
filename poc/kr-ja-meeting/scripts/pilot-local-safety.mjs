@@ -282,10 +282,17 @@ export function buildCodexChildEnv(source = process.env) {
   return environment;
 }
 
-async function trustedExecutableIdentity({ codexPackageRoot }) {
-  if (process.platform !== "darwin" || process.arch !== "arm64") {
-    throw new Error("Frozen current-provider Codex executable requires macOS arm64");
+export function requireFrozenCodexRuntime(
+  platform = process.platform,
+  architecture = process.arch,
+) {
+  if (platform !== "darwin" || architecture !== "arm64") {
+    throw new Error("Frozen current-provider runtime requires macOS arm64 and Codex 0.151.0");
   }
+}
+
+async function trustedExecutableIdentity({ codexPackageRoot }) {
+  requireFrozenCodexRuntime();
   const codexEntrypoint = resolve(codexPackageRoot, "bin/codex.js");
   const packageJson = resolve(codexPackageRoot, "package.json");
   const nativePackageRoot = resolve(

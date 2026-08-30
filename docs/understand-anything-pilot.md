@@ -62,6 +62,11 @@ Agent Lane은 다음 네 조건을 모두 충족해야 한다.
 - Pilot Artifact는 로컬에만 두며 commit, CI, schedule, background automation을 사용하지 않는다.
 - 결과가 수용될 때까지 artifact와 timing record를 보존한다. Cleanup에는 별도의 명시적 결정이 필요하다.
 
+Agent Lane의 calibration과 Paired Comparison provider 실행은 `macOS arm64`와 정확히
+Codex `0.151.0`인 로컬 runtime을 전제로 한다. 다른 OS, architecture, Codex version에서는
+호환 실행을 시도하지 않고 fail-closed로 중단한다. Unit test는 이 runtime gate를 별도로
+검증하며, 지원하지 않는 플랫폼에서 실제 Codex identity 검사는 명시적으로 skip한다.
+
 ## 로컬 graph adapter
 
 AIN-7639는 검토한 upstream source를 감싸는 fail-closed adapter로
@@ -78,12 +83,18 @@ checkout 또는 공식 repository URL을 전달한다. `prepare`는 새 artifact
 기존 root가 비어 있더라도 다시 사용하거나 덮어쓰지 않는다. 재실행은 새 경로를 선택한다.
 기존 artifact cleanup은 별도 명시적 승인이 필요하다.
 
+AIN-7639의 기존 artifact는 과거 보존 증거(historical retained evidence)다. 그 artifact의
+upstream checkout에는 tracked lock mutation이 있으므로 이를 숨기거나 수정하거나 새
+calibration 또는 comparison의 input으로 재사용하지 않는다. 새 실행은 아래처럼 새로운
+artifact root를 선택하고 `prepare`부터 시작한다. 기존 artifact는 결과가 수용될 때까지
+그대로 보존하며 cleanup은 여전히 별도 승인 대상이다.
+
 ```bash
 cd /absolute/path/to/repository/poc/kr-ja-meeting
 
 node scripts/understand-anything-pilot.mjs prepare \
   --repo /absolute/path/to/repository \
-  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run \
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run-NEW \
   --upstream-source /absolute/path/to/reviewed/Understand-Anything
 ```
 
@@ -95,11 +106,11 @@ phase이며 automatic refresh나 background 실행을 허용하지 않는다.
 
 ```bash
 npm run pilot:run-budgeted -- \
-  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run \
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run-NEW \
   --phase fullAnalysis
 
 npm run pilot:run-budgeted -- \
-  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run \
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run-NEW \
   --phase incrementalRefresh
 ```
 
@@ -107,7 +118,7 @@ upstream scanning 뒤에는 inventory가 정확히 일치해야 한다.
 
 ```bash
 node scripts/understand-anything-pilot.mjs verify-scan \
-  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run-NEW
 ```
 
 `prepare`는 `run-metrics.json`과 `calibration-answer.json`을 `not-run` 상태로
@@ -120,7 +131,7 @@ corpus 준비나 deterministic scan만으로는 Pilot 통과가 아니다.
 
 ```bash
 node scripts/understand-anything-pilot.mjs verify-artifact \
-  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run
+  --artifact-root /absolute/path/to/repository/.ua-pilot/pilot-run-NEW
 ```
 
 ## Agent-only 판정

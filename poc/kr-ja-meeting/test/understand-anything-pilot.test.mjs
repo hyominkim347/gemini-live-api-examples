@@ -195,8 +195,10 @@ test("plan pins isolated upstream execution and disables redirect and automation
 });
 
 test("operator docs provide package-cwd commands for every budgeted phase and adjudication", async () => {
-  const [operatorDocs, packageText] = await Promise.all([
+  const [operatorDocs, calibrationDocs, comparisonDocs, packageText] = await Promise.all([
     readFile(join(projectRoot, "docs", "understand-anything-pilot.md"), "utf8"),
+    readFile(join(projectRoot, "docs", "agent-lane-calibration.md"), "utf8"),
+    readFile(join(projectRoot, "docs", "agent-lane-comparison.md"), "utf8"),
     readFile(join(projectRoot, "poc", "kr-ja-meeting", "package.json"), "utf8"),
   ]);
   const packageManifest = JSON.parse(packageText);
@@ -217,6 +219,20 @@ test("operator docs provide package-cwd commands for every budgeted phase and ad
     operatorDocs,
     /npm run pilot:adjudicate-agent --[\s\\]*\n/,
   );
+  assert.match(operatorDocs, /macOS arm64/);
+  assert.match(operatorDocs, /Codex `?0\.151\.0`?/);
+  assert.match(operatorDocs, /historical retained evidence|과거 보존 증거/);
+  assert.match(operatorDocs, /새(?:로운)? artifact root[\s\S]*prepare/i);
+  assert.match(comparisonDocs, /frozen-digest-provenance-v1/);
+  assert.match(comparisonDocs, /exact frozen raw SHA|정확한\s+frozen raw SHA/i);
+  assert.match(comparisonDocs, /<NEW_PILOT_ARTIFACT_ROOT>/);
+  assert.doesNotMatch(comparisonDocs, /<PILOT_ARTIFACT_ROOT>/);
+  assert.match(calibrationDocs, /ua_pilot_material_only/);
+  assert.match(comparisonDocs, /ua_pilot_material_only/);
+  assert.doesNotMatch(calibrationDocs, /AIN-7639가 생성한 고정 로컬 graph를 재사용/);
+  assert.doesNotMatch(calibrationDocs, /AIN-7639 Pilot Artifact를 read-only input/);
+  assert.doesNotMatch(calibrationDocs, /--sandbox read-only/);
+  assert.doesNotMatch(comparisonDocs, /--sandbox read-only/);
   assert.equal(
     packageManifest.scripts["pilot:run-budgeted"],
     "node scripts/understand-anything-pilot.mjs run-budgeted",

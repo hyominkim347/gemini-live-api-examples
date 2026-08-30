@@ -16,11 +16,14 @@ import {
   initializeEmptyPilotOutput,
   loadVerifiedPilotArtifact,
   requireApprovedPilotOutput,
+  requireFrozenCodexRuntime,
   requirePosixProcessGroups,
   resolveTrustedCodexIdentity,
   requirePilotChildDirectory,
   spawnCodexChild,
 } from "../scripts/pilot-local-safety.mjs";
+
+const supportsFrozenCodexRuntime = process.platform === "darwin" && process.arch === "arm64";
 
 function git(repo, args) {
   const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
@@ -158,7 +161,11 @@ test("Codex child environment is an allowlist with no provider or secret variabl
   });
 });
 
-test("trusted Codex identity ignores a fake caller PATH binary", async () => {
+test("trusted Codex identity ignores a fake caller PATH binary", {
+  skip: supportsFrozenCodexRuntime
+    ? false
+    : "frozen Codex runtime requires macOS arm64",
+}, async () => {
   const root = await mkdtemp(join(tmpdir(), "ua-fake-codex-path-"));
   const fakeCodex = join(root, "codex");
   try {
@@ -176,6 +183,18 @@ test("trusted Codex identity ignores a fake caller PATH binary", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("frozen Codex runtime allows macOS arm64 and fails closed elsewhere", () => {
+  assert.doesNotThrow(() => requireFrozenCodexRuntime("darwin", "arm64"));
+  assert.throws(
+    () => requireFrozenCodexRuntime("linux", "x64"),
+    /requires macOS arm64 and Codex 0\.151\.0/,
+  );
+  assert.throws(
+    () => requireFrozenCodexRuntime("win32", "x64"),
+    /requires macOS arm64 and Codex 0\.151\.0/,
+  );
 });
 
 test("process-group timeouts fail closed on Windows", () => {

@@ -8,6 +8,7 @@ import {
   adjudicateAgentOnlyGate,
   FROZEN_BENCHMARK_SHA256,
   FROZEN_RAW_RESULTS_SHA256,
+  verifyFrozenAgentOnlyInputs,
 } from "../src/agent-only-pilot-gate.mjs";
 
 const benchmarkUrl = new URL("../benchmark/impact-benchmark.v1.json", import.meta.url);
@@ -263,6 +264,32 @@ test("changed benchmark or raw bytes fail before adjudication", async () => {
   );
 });
 
+test("frozen input verification does not accept caller-selected digests", async () => {
+  const input = await fixture();
+  assert.throws(
+    () => verifyFrozenAgentOnlyInputs({
+      benchmarkText: input.benchmarkText,
+      rawText: input.rawText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: input.expectedRawSha256,
+    }),
+    /digest mismatch/,
+  );
+
+  const changed = JSON.parse(input.rawText);
+  changed.provider = "arbitrary-legacy-provider";
+  const changedText = JSON.stringify(changed);
+  assert.throws(
+    () => adjudicateAgentOnlyGate({
+      benchmarkText: input.benchmarkText,
+      rawText: changedText,
+      expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      expectedRawSha256: sha256(changedText),
+    }),
+    /identity is invalid/,
+  );
+});
+
 test("the frozen AIN-7643 raw artifact deterministically activates the Stop Rule", {
   skip: !existsSync(actualRawPath),
 }, async () => {
@@ -270,6 +297,7 @@ test("the frozen AIN-7643 raw artifact deterministically activates the Stop Rule
     readFile(benchmarkUrl, "utf8"),
     readFile(actualRawPath, "utf8"),
   ]);
+  const verified = verifyFrozenAgentOnlyInputs({ benchmarkText, rawText });
   const result = adjudicateAgentOnlyGate({
     benchmarkText,
     rawText,
@@ -277,6 +305,17 @@ test("the frozen AIN-7643 raw artifact deterministically activates the Stop Rule
     expectedRawSha256: FROZEN_RAW_RESULTS_SHA256,
   });
 
+  assert.deepEqual(verified.provenance, {
+    mode: "frozen-digest-provenance-v1",
+    benchmarkSha256: FROZEN_BENCHMARK_SHA256,
+    rawResultsSha256: FROZEN_RAW_RESULTS_SHA256,
+    benchmarkRevision: "impact-benchmark-v1",
+    analysisSnapshot: "5bf36dd61b6355368d736479c5ffb528b656d544",
+    provider: "current-codex-provider-only",
+    orderPolicy: "odd-graph-first-even-rg-first",
+    timeoutMs: 600_000,
+    completedRuns: 24,
+  });
   assert.equal(result.resultRouting, "Stop Rule");
   assert.equal(result.metrics.correctAnswers, 0);
   assert.equal(result.metrics.evidencedAnswers, 0);
