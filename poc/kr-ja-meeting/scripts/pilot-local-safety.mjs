@@ -26,6 +26,28 @@ const FROZEN_CODEX_NATIVE_PACKAGE_SHA256 =
   "6cc1c61958cf5bc9eb8130e521beef3eb8ab4db0ecb98da939a6f5994b55412b";
 const FROZEN_CODEX_PACKAGE_VERSION = "0.151.0";
 
+const FROZEN_CODEX_RUNTIME_PROVENANCE = Object.freeze({
+  identityKind: "staged-codex-runtime-v1",
+  packageName: "@openai/codex",
+  packageVersion: FROZEN_CODEX_PACKAGE_VERSION,
+  nativePackageName: "@openai/codex",
+  nativePackageVersion: `${FROZEN_CODEX_PACKAGE_VERSION}-darwin-arm64`,
+  codexSha256: FROZEN_CODEX_EXECUTABLE_SHA256,
+  entrypointSha256: FROZEN_CODEX_ENTRY_SHA256,
+  packageSha256: FROZEN_CODEX_PACKAGE_SHA256,
+  nativePackageSha256: FROZEN_CODEX_NATIVE_PACKAGE_SHA256,
+});
+
+export function frozenCodexRuntimeProvenance() {
+  return { ...FROZEN_CODEX_RUNTIME_PROVENANCE };
+}
+
+export function codexRuntimeProvenance(identity) {
+  return Object.fromEntries(
+    Object.keys(FROZEN_CODEX_RUNTIME_PROVENANCE).map((key) => [key, identity?.[key]]),
+  );
+}
+
 const CODEX_CHILD_ENV_KEYS = [
   "CODEX_HOME",
   "HOME",
@@ -507,31 +529,46 @@ function canonicalSupervisionRoot(path) {
   return root;
 }
 
-function supervisedProcessIds(supervisionRoot, pid) {
+function canonicalSupervisionRoots({ supervisionRoot, supervisionRoots, cwd }) {
+  if (supervisionRoot !== undefined && supervisionRoots !== undefined) {
+    throw new TypeError("Use supervisionRoot or supervisionRoots, not both");
+  }
+  const requested = supervisionRoots ?? [supervisionRoot ?? cwd];
+  if (!Array.isArray(requested) || requested.length === 0 ||
+      requested.some((root) => typeof root !== "string" || !root)) {
+    throw new TypeError("supervisionRoots must contain explicit isolated directories");
+  }
+  return [...new Set(requested.map(canonicalSupervisionRoot))];
+}
+
+function supervisedProcessIds(supervisionRoots, pid) {
   // This is an OS-observed boundary for ordinary provider/tool descendants,
   // including children that clear their environment or create a new session.
   // It is not a claim of containment against a same-user process that
   // deliberately changes cwd or tampers with this runner.
-  const args = ["-n", "-P", "-a"];
-  if (pid) args.push("-p", String(pid));
-  args.push("-d", "cwd", "+D", supervisionRoot, "-F", "p");
-  const result = spawnSync("/usr/sbin/lsof", args, {
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  if (![0, 1].includes(result.status)) {
-    throw new Error("Unable to enumerate supervised provider descendants");
+  const processes = new Set();
+  for (const supervisionRoot of supervisionRoots) {
+    const args = ["-n", "-P", "-a"];
+    if (pid) args.push("-p", String(pid));
+    args.push("-d", "cwd", "+D", supervisionRoot, "-F", "p");
+    const result = spawnSync("/usr/sbin/lsof", args, {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    if (![0, 1].includes(result.status)) {
+      throw new Error("Unable to enumerate supervised provider descendants");
+    }
+    for (const line of result.stdout.split("\n")) {
+      if (/^p\d+$/.test(line)) processes.add(Number.parseInt(line.slice(1), 10));
+    }
   }
-  return result.stdout
-    .split("\n")
-    .filter((line) => /^p\d+$/.test(line))
-    .map((line) => Number.parseInt(line.slice(1), 10))
+  return [...processes]
     .filter((pid) => Number.isInteger(pid) && pid > 1 && pid !== process.pid);
 }
 
-function signalSupervisedProcesses(supervisionRoot, signal) {
-  for (const pid of supervisedProcessIds(supervisionRoot)) {
-    if (!supervisedProcessIds(supervisionRoot, pid).includes(pid)) continue;
+function signalSupervisedProcesses(supervisionRoots, signal) {
+  for (const pid of supervisedProcessIds(supervisionRoots)) {
+    if (!supervisedProcessIds(supervisionRoots, pid).includes(pid)) continue;
     try {
       process.kill(pid, signal);
     } catch (error) {
@@ -540,8 +577,8 @@ function signalSupervisedProcesses(supervisionRoot, signal) {
   }
 }
 
-function supervisedProcessesAlive(supervisionRoot) {
-  return supervisedProcessIds(supervisionRoot).length > 0;
+function supervisedProcessesAlive(supervisionRoots) {
+  return supervisedProcessIds(supervisionRoots).length > 0;
 }
 
 export function requirePosixProcessGroups(
@@ -557,7 +594,8 @@ export function runProcessGroupWithTimeout({
   executable,
   args = [],
   cwd = process.cwd(),
-  supervisionRoot = cwd,
+  supervisionRoot,
+  supervisionRoots,
   env = process.env,
   input,
   timeoutMs,
@@ -583,14 +621,15 @@ export function runProcessGroupWithTimeout({
   if (!Number.isFinite(maxBuffer) || maxBuffer <= 0) {
     throw new TypeError("maxBuffer must be a positive finite number");
   }
-  if (typeof supervisionRoot !== "string" || !supervisionRoot) {
-    throw new TypeError("supervisionRoot must be an explicit isolated directory");
-  }
   requirePosixProcessGroups();
-  const supervisedRoot = canonicalSupervisionRoot(supervisionRoot);
+  const supervisedRoots = canonicalSupervisionRoots({
+    supervisionRoot,
+    supervisionRoots,
+    cwd,
+  });
   const supervisedCwd = realpathSync(resolve(cwd));
-  if (!pathIsInside(supervisedRoot, supervisedCwd)) {
-    throw new Error("Provider cwd must stay inside its supervision root");
+  if (!supervisedRoots.some((root) => pathIsInside(root, supervisedCwd))) {
+    throw new Error("Provider cwd must stay inside one of its supervision roots");
   }
 
   const child = spawn(executable, args, {
@@ -637,7 +676,7 @@ export function runProcessGroupWithTimeout({
     const verifyForcedCleanup = (deadline) => {
       let survivors = [];
       try {
-        survivors = supervisedProcessIds(supervisedRoot);
+        survivors = supervisedProcessIds(supervisedRoots);
       } catch (error) {
         processError ??= error;
       }
@@ -660,13 +699,13 @@ export function runProcessGroupWithTimeout({
       if (terminationStarted) return;
       terminationStarted = true;
       try {
-        signalSupervisedProcesses(supervisedRoot, "SIGTERM");
+        signalSupervisedProcesses(supervisedRoots, "SIGTERM");
       } catch (error) {
         processError ??= error;
       }
       forceKillTimer = setTimeout(() => {
         try {
-          signalSupervisedProcesses(supervisedRoot, "SIGKILL");
+          signalSupervisedProcesses(supervisedRoots, "SIGKILL");
         } catch (error) {
           processError ??= error;
         }
@@ -687,7 +726,7 @@ export function runProcessGroupWithTimeout({
     const handleLeaderExit = (status, signal) => {
       closeResult ??= { status, signal };
       try {
-        if (supervisedProcessesAlive(supervisedRoot)) {
+        if (supervisedProcessesAlive(supervisedRoots)) {
           beginTermination();
         } else {
           forceKillComplete = true;

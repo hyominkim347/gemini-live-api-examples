@@ -22,8 +22,12 @@ import {
   runtimeDigestBeforePhase,
   snapshotDigestBeforePhase,
   runBudgetedPilotPhase,
+  stageSealedPlanCodexRuntime,
 } from "../scripts/understand-anything-pilot.mjs";
-import { buildCodexChildEnv } from "../scripts/pilot-local-safety.mjs";
+import {
+  buildCodexChildEnv,
+  spawnTrustedCodexChild,
+} from "../scripts/pilot-local-safety.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "../../..");
@@ -163,7 +167,7 @@ test("plan pins isolated upstream execution and disables redirect and automation
       timeoutPolicy: "SIGTERM-then-SIGKILL",
     });
     const expectedCommand = [
-      "codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+      "staged-codex-runtime-v1", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
       "--sandbox", "workspace-write", "-C", plan.snapshotCheckout,
       "--add-dir", plan.upstream.checkout, "-",
     ];
@@ -174,6 +178,17 @@ test("plan pins isolated upstream execution and disables redirect and automation
         promptFile: "incremental-codex-prompt.md",
       },
     });
+    assert.deepEqual(plan.providerRuntime, {
+      identityKind: "staged-codex-runtime-v1",
+      packageName: "@openai/codex",
+      packageVersion: "0.151.0",
+      nativePackageName: "@openai/codex",
+      nativePackageVersion: "0.151.0-darwin-arm64",
+      codexSha256: "98491713ffb196061003ee148636e743997cc31d76144ba7c53462269896891d",
+      entrypointSha256: "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+      packageSha256: "350fc14f5e912071a6725c6ce00904da87e67e1145d43296c8beffb2349c1be6",
+      nativePackageSha256: "6cc1c61958cf5bc9eb8130e521beef3eb8ab4db0ecb98da939a6f5994b55412b",
+    });
     assert.equal(plan.artifacts.commitPolicy, "local-uncommitted-only");
     assert.ok(plan.prohibited.includes("global-installer"));
     assert.ok(plan.prohibited.includes("symlink"));
@@ -183,10 +198,15 @@ test("plan pins isolated upstream execution and disables redirect and automation
     );
     assert.equal(seal.analysisSnapshot, snapshot);
     assert.equal(seal.upstreamCommit, "ba450c43425f3de6d43daf76526950ad8ca93536");
+    assert.equal(
+      seal.providerRuntimeSha256,
+      sha256(JSON.stringify(plan.providerRuntime)),
+    );
     for (const digest of [
       seal.planSha256,
       seal.corpusManifestSha256,
       seal.corpusSha256,
+      seal.providerRuntimeSha256,
       seal.phaseInvocations.fullAnalysis.commandSha256,
       seal.phaseInvocations.fullAnalysis.promptSha256,
       seal.phaseInvocations.incrementalRefresh.commandSha256,
@@ -194,6 +214,50 @@ test("plan pins isolated upstream execution and disables redirect and automation
     ]) {
       assert.match(digest, /^[a-f0-9]{64}$/);
     }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("a sealed graph plan ignores fake PATH and stages the frozen Codex runtime", {
+  skip: process.platform !== "darwin" || process.arch !== "arm64"
+    ? "Frozen Codex runtime requires macOS arm64"
+    : false,
+}, async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "ua-pilot-trusted-plan-"));
+  const artifactRoot = join(fixtureRoot, ".ua-pilot");
+  const fakeBin = join(fixtureRoot, "fake-bin");
+  const marker = join(fixtureRoot, "fake-codex-ran.txt");
+  try {
+    const planned = runPilot([
+      "plan", "--repo", projectRoot, "--artifact-root", artifactRoot,
+    ]);
+    assert.equal(planned.status, 0, planned.stderr || planned.stdout);
+    await mkdir(fakeBin);
+    const fakeCodex = join(fakeBin, "codex");
+    await writeFile(fakeCodex, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, "utf8");
+    await chmod(fakeCodex, 0o755);
+    const [plan, seal] = await Promise.all([
+      readFile(join(artifactRoot, "pilot-plan.json"), "utf8").then(JSON.parse),
+      readFile(join(artifactRoot, "pilot-plan-seal.json"), "utf8").then(JSON.parse),
+    ]);
+
+    const identity = await stageSealedPlanCodexRuntime({
+      plan,
+      seal,
+      environment: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+    });
+    assert.notEqual(identity.codexExecutable, fakeCodex);
+    const launched = await spawnTrustedCodexChild({
+      identity,
+      args: ["--version"],
+      prompt: "",
+      timeoutMs: 10_000,
+      supervisionRoot: artifactRoot,
+    });
+    assert.equal(launched.status, 0);
+    assert.match(launched.stdout, /codex-cli 0\.151\.0/);
+    await assert.rejects(access(marker), { code: "ENOENT" });
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }
@@ -776,7 +840,7 @@ test("verify-artifact rejects self-reports and preserves runner-issued provenanc
       metrics[phase] = await runBudgetedPilotPhase({
         phase,
         budgetMilliseconds: plan.budgetsMilliseconds[phase],
-        command: plan.phaseInvocations[phase].command,
+        command: [fakeCodex],
         cwd: snapshotCheckout,
         env: {
           ...buildCodexChildEnv(runnerEnvironment),
@@ -786,6 +850,10 @@ test("verify-artifact rejects self-reports and preserves runner-issued provenanc
       });
       metrics[phase].runtimeMaterialSha256 = sha256("");
       metrics[phase].snapshotOutputSha256 = snapshotOutputSha256;
+      metrics[phase].commandSha256 = sha256(
+        JSON.stringify(plan.phaseInvocations[phase].command),
+      );
+      metrics[phase].providerRuntime = plan.providerRuntime;
       assert.equal(metrics[phase].status, "completed");
     }
     await writeFile(join(artifactRoot, "run-metrics.json"), JSON.stringify(metrics), "utf8");

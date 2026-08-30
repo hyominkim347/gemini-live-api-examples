@@ -8,10 +8,15 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
 import {
+  assertStagedCodexIdentity,
   buildCodexChildEnv,
+  codexRuntimeProvenance,
+  frozenCodexRuntimeProvenance,
   loadVerifiedPilotArtifact,
   requireApprovedPilotOutput,
+  resolveTrustedCodexIdentity,
   runProcessGroupWithTimeout,
+  stageTrustedCodexRuntime,
 } from "./pilot-local-safety.mjs";
 
 export const ANALYSIS_SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
@@ -79,6 +84,8 @@ export async function runBudgetedPilotPhase({
   env = process.env,
   killGraceMilliseconds = 1_000,
   stdinText,
+  supervisionRoots,
+  trustedCodexIdentity,
 }) {
   if (!PHASES.includes(phase)) {
     throw new TypeError(`Unsupported pilot phase: ${phase}`);
@@ -99,11 +106,23 @@ export async function runBudgetedPilotPhase({
 
   const startedAt = new Date().toISOString();
   const started = performance.now();
+  let executable = command[0];
+  let childArgs = command.slice(1);
+  let providerRuntime = null;
+  if (trustedCodexIdentity) {
+    const trusted = await assertStagedCodexIdentity(trustedCodexIdentity);
+    providerRuntime = codexRuntimeProvenance(trusted);
+    if (command[0] !== providerRuntime.identityKind) {
+      throw new Error("Budgeted command is not bound to the staged Codex runtime");
+    }
+    executable = trusted.codexExecutable;
+    childArgs = command.slice(1);
+  }
   const child = await runProcessGroupWithTimeout({
-    executable: command[0],
-    args: command.slice(1),
+    executable,
+    args: childArgs,
     cwd,
-    supervisionRoot: cwd,
+    supervisionRoots: supervisionRoots ?? [cwd],
     env,
     input: stdinText,
     timeoutMs: budgetMilliseconds,
@@ -126,6 +145,7 @@ export async function runBudgetedPilotPhase({
     signal: child.signal,
     spawnError: child.error?.message ?? null,
     commandSha256: createHash("sha256").update(JSON.stringify(command)).digest("hex"),
+    providerRuntime,
     startedAt,
     finishedAt: new Date().toISOString(),
   };
@@ -312,6 +332,7 @@ function buildPilotPlan(repo, artifactRoot) {
     sourceRepository: resolve(repo),
     snapshotCheckout,
     provider: "current-codex-provider-only",
+    providerRuntime: frozenCodexRuntimeProvenance(),
     environment: {
       UNDERSTAND_NO_WORKTREE_REDIRECT: "1",
     },
@@ -379,6 +400,7 @@ function buildPlanSeal({ plan, planText, manifest, manifestText }) {
     planSha256: sha256(planText),
     corpusManifestSha256: sha256(manifestText),
     corpusSha256: corpusSha256(plan.sourceRepository, manifest),
+    providerRuntimeSha256: sha256(JSON.stringify(plan.providerRuntime)),
     phaseInvocations: Object.fromEntries(PHASES.map((phase) => [phase, {
       commandSha256: sha256(JSON.stringify(buildCodexCommand(plan))),
       promptSha256: sha256(buildCodexPrompt(plan, phase)),
@@ -408,10 +430,30 @@ async function writeSealedPlanFiles({ artifactRoot, plan, manifest }) {
 
 function buildCodexCommand(plan) {
   return [
-    "codex", "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+    plan.providerRuntime.identityKind,
+    "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
     "--sandbox", "workspace-write", "-C", plan.snapshotCheckout,
     "--add-dir", plan.upstream.checkout, "-",
   ];
+}
+
+export async function stageSealedPlanCodexRuntime({
+  plan,
+  seal,
+  environment = process.env,
+}) {
+  const expected = frozenCodexRuntimeProvenance();
+  if (JSON.stringify(plan?.providerRuntime) !== JSON.stringify(expected) ||
+      seal?.providerRuntimeSha256 !== sha256(JSON.stringify(expected))) {
+    throw new Error("Pilot plan is not bound to the frozen staged Codex runtime");
+  }
+  const staged = await stageTrustedCodexRuntime(
+    await resolveTrustedCodexIdentity({ environment }),
+  );
+  if (JSON.stringify(codexRuntimeProvenance(staged)) !== JSON.stringify(expected)) {
+    throw new Error("Staged Codex runtime provenance differs from the sealed plan");
+  }
+  return staged;
 }
 
 function buildCodexPrompt(plan, phase = "fullAnalysis") {
@@ -750,7 +792,7 @@ export async function validateSealedPilotRun(artifactRoot, phase) {
   if (sha256(promptText) !== JSON.parse(sealText).phaseInvocations[phase]?.promptSha256) {
     throw new Error(`${phase} prompt digest changed from the sealed plan`);
   }
-  return { artifactRoot: approvedRoot, plan, manifest, promptFile, promptText };
+  return { artifactRoot: approvedRoot, plan, manifest, promptFile, promptText, sealText };
 }
 
 async function ensurePinnedCheckout({ source, destination, commit, label }) {
@@ -891,6 +933,7 @@ async function prepareCommand(args) {
       planSealSha256: sealSha256,
       planSha256: seal.planSha256,
       corpusSha256: seal.corpusSha256,
+      providerRuntimeSha256: seal.providerRuntimeSha256,
       commandSha256: Object.fromEntries(PHASES.map((phase) => [
         phase,
         seal.phaseInvocations[phase].commandSha256,
@@ -937,7 +980,7 @@ async function runBudgetedCommand(args) {
     options["artifact-root"] ?? resolve(process.cwd(), ".ua-pilot"),
     phase,
   );
-  const { artifactRoot, plan, promptText } = validated;
+  const { artifactRoot, plan, promptText, sealText } = validated;
   const budgetMilliseconds = plan.budgetsMilliseconds?.[phase];
   const requiredBudget = phase === "fullAnalysis"
     ? FULL_ANALYSIS_BUDGET_MS
@@ -957,11 +1000,17 @@ async function runBudgetedCommand(args) {
   if (invocation.promptFile !== expectedPromptFile) {
     throw new Error(`${phase} prompt contract changed`);
   }
+  const trustedCodexIdentity = await stageSealedPlanCodexRuntime({
+    plan,
+    seal: JSON.parse(sealText),
+  });
   const metric = await runBudgetedPilotPhase({
     phase,
     budgetMilliseconds,
     command: expectedCommand,
     cwd: plan.snapshotCheckout,
+    supervisionRoots: [plan.snapshotCheckout, plan.upstream.installRoot],
+    trustedCodexIdentity,
     env: { ...buildCodexChildEnv(), ...plan.environment },
     stdinText: promptText,
   });
@@ -1111,6 +1160,8 @@ async function verifyArtifactCommand(args) {
         metric?.budgetMilliseconds !== budget || metric?.timedOut !== false ||
         metric?.exitCode !== 0 || metric?.phase !== name || metric?.signal !== null ||
         metric?.spawnError !== null || metric?.commandSha256 !== expectedCommandSha256 ||
+        JSON.stringify(metric?.providerRuntime) !==
+          JSON.stringify(frozenCodexRuntimeProvenance()) ||
         !metric?.runtimeMaterialSha256 || !metric?.snapshotOutputSha256 ||
         !metric?.startedAt || !metric?.finishedAt) {
       errors.push(`${name} timing evidence was not issued by the budgeted child runner`);
@@ -1133,7 +1184,13 @@ async function verifyArtifactCommand(args) {
   if (prepared.globalInstallerUsed !== false || prepared.symlinksCreated !== false) {
     errors.push("prepare evidence permits a global installer or symlink");
   }
+  if (prepared.providerRuntimeSha256 !==
+      sha256(JSON.stringify(frozenCodexRuntimeProvenance()))) {
+    errors.push("prepare evidence is not bound to the frozen staged Codex runtime");
+  }
   if (plan.provider !== "current-codex-provider-only" ||
+      JSON.stringify(plan.providerRuntime) !==
+        JSON.stringify(frozenCodexRuntimeProvenance()) ||
       plan.environment?.UNDERSTAND_NO_WORKTREE_REDIRECT !== "1" ||
       !plan.understandArguments?.includes("--no-auto-update")) {
     errors.push("provider, worktree redirect, or auto-update policy changed");

@@ -18,6 +18,7 @@ import {
   requireApprovedPilotOutput,
   requireFrozenCodexRuntime,
   requirePosixProcessGroups,
+  runProcessGroupWithTimeout,
   resolveTrustedCodexIdentity,
   requirePilotChildDirectory,
   spawnCodexChild,
@@ -390,6 +391,71 @@ test("Codex success cleans a descendant that creates a detached process group", 
     assert.equal(result.status, 0);
     assert.equal(result.timedOut, false);
     await assert.rejects(access(marker), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const mode of ["success", "timeout"]) {
+  test(`multi-root supervision cleans an environment-free detached sibling-cwd descendant after ${mode}`, {
+    skip: !supportsFrozenCodexRuntime ? "macOS arm64 cwd supervision is required" : false,
+  }, async () => {
+    const root = await mkdtemp(join(tmpdir(), `ua-multi-root-${mode}-`));
+    const snapshotRoot = join(root, "analysis-snapshot");
+    const upstreamRoot = join(root, "understand-anything");
+    const marker = join(root, `${mode}-sibling-survived.txt`);
+    await Promise.all([mkdir(snapshotRoot), mkdir(upstreamRoot)]);
+    const descendantProgram = [
+      "const { writeFileSync } = require('node:fs');",
+      "process.on('SIGTERM', () => {});",
+      `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'survived'); process.exit(0); }, 2_000);`,
+    ].join("");
+    const leaderProgram = [
+      "const { spawn } = require('node:child_process');",
+      "const childEnv = { PATH: process.env.PATH };",
+      "delete childEnv.UA_PILOT_RUN_ID;",
+      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantProgram)}], { cwd: ${JSON.stringify(upstreamRoot)}, detached: true, stdio: 'ignore', env: childEnv });`,
+      "child.unref();",
+      mode === "success" ? "process.exit(0);" : "setInterval(() => {}, 1000);",
+    ].join("");
+    try {
+      const result = await runProcessGroupWithTimeout({
+        executable: process.execPath,
+        args: ["-e", leaderProgram],
+        cwd: snapshotRoot,
+        supervisionRoots: [snapshotRoot, upstreamRoot],
+        timeoutMs: mode === "success" ? 1_000 : 100,
+        killGraceMilliseconds: 50,
+      });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2_050));
+      assert.equal(result.timedOut, mode === "timeout");
+      await assert.rejects(access(marker), { code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("multi-root supervision rejects a symlinked sibling root before spawn", {
+  skip: !supportsFrozenCodexRuntime ? "macOS arm64 cwd supervision is required" : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "ua-multi-root-symlink-"));
+  const snapshotRoot = join(root, "analysis-snapshot");
+  const upstreamRoot = join(root, "understand-anything");
+  const upstreamAlias = join(root, "upstream-alias");
+  try {
+    await Promise.all([mkdir(snapshotRoot), mkdir(upstreamRoot)]);
+    await symlink(upstreamRoot, upstreamAlias, "dir");
+    assert.throws(
+      () => runProcessGroupWithTimeout({
+        executable: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        cwd: snapshotRoot,
+        supervisionRoots: [snapshotRoot, upstreamAlias],
+        timeoutMs: 1_000,
+      }),
+      /supervision root.*symlink/i,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

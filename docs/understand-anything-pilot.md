@@ -98,11 +98,19 @@ node scripts/understand-anything-pilot.mjs prepare \
   --upstream-source /absolute/path/to/reviewed/Understand-Anything
 ```
 
-생성된 sealed plan과 prompt는 반드시 budget runner로 실행한다. runner는 현재 Codex
-provider와 `UNDERSTAND_NO_WORKTREE_REDIRECT=1`만 사용하고, dependency 설치와 core build를
-고정된 artifact-local checkout으로 제한한다. full analysis는 `--full`, `--language ko`,
+생성된 sealed plan과 prompt는 반드시 budget runner로 실행한다. plan과 seal은 Codex
+`0.151.0`의 native executable, wrapper, package digest로 구성된 staged runtime provenance를
+고정한다. runner는 caller `PATH`의 `codex`를 실행하지 않고, 검증한 runtime을 private
+`.ua-pilot` 경계에 복사해 실행 직전에 다시 검증한다. 현재 Codex provider와
+`UNDERSTAND_NO_WORKTREE_REDIRECT=1`만 사용하고, dependency 설치와 core build를 고정된
+artifact-local checkout으로 제한한다. full analysis는 `--full`, `--language ko`,
 `--no-auto-update`를 고정한다. Incremental Refresh는 같은 sealed plan의 수동 두 번째
 phase이며 automatic refresh나 background 실행을 허용하지 않는다.
+
+budget runner는 Analysis Snapshot checkout과 Understand-Anything install root를 각각
+canonical non-symlink root로 검증해 함께 감독한다. provider leader 또는 detached child가
+두 root 중 어느 쪽을 working directory로 사용해도 정상 종료와 timeout 뒤 bounded cleanup을
+수행한다. 이 경계는 임의의 same-user tampering에 대한 OS sandbox 주장이 아니다.
 
 ```bash
 npm run pilot:run-budgeted -- \
