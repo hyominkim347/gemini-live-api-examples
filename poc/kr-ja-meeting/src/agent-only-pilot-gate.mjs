@@ -1,243 +1,89 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 export const FROZEN_BENCHMARK_SHA256 =
   "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6";
 export const FROZEN_RAW_RESULTS_SHA256 =
   "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0";
+export const FROZEN_MANUAL_ADJUDICATION_SHA256 =
+  "135fe995bd491f8e5ff5cf9184c2153037bb59f8a7a05d5699f6cd7c7cdda786";
 
 const PROVIDER = "current-codex-provider-only";
 const ORDER_POLICY = "odd-graph-first-even-rg-first";
 const GRAPH_ARM = "understandAnythingGraph";
 const RG_ARM = "repositorySearchRg";
-const SCORER_REVISION = "agent-only-gate-v3";
-const OUTPUT_CONTRACT_VERSION = 2;
-const SEMANTIC_RULE_REVISION = "expected-summary-subject-bound-claims-v2";
-const SOFT_MATCH_NUMERATOR = 2;
-const SOFT_MATCH_DENOMINATOR = 3;
-const ANSWER_CLAUSE_WINDOW = 1;
-
-const SEMANTIC_STOP_WORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "be",
-  "by",
-  "for",
-  "from",
-  "in",
-  "is",
-  "of",
-  "on",
-  "or",
-  "the",
-  "to",
-  "가",
-  "과",
-  "관련",
-  "그",
-  "및",
-  "받는다",
-  "보장",
-  "복구",
-  "사이",
-  "사이에",
-  "영향",
-  "없다",
-  "없음",
-  "또는",
-  "와",
-  "을",
-  "이",
-  "있다",
-  "직접",
-  "함께",
-  "한다",
-  "한다는",
-  "동작",
-  "경로",
-  "단위",
-  "단위다",
-  "후",
-]);
-
-const SEMANTIC_CONCEPT_DEFINITIONS = [
-  { concept: "utterance", kind: "entity", aliases: ["utterance", "발화"] },
-  { concept: "boundary", kind: "action", aliases: ["boundary", "경계", "종료"] },
-  { concept: "decision", kind: "action", aliases: ["decision", "판정", "확정", "조건"] },
-  { concept: "automatic", kind: "modifier", aliases: ["automatic", "자동"] },
-  { concept: "listening", kind: "entity", aliases: ["listening", "청취", "듣기"] },
-  { concept: "create", kind: "action", aliases: ["create", "make", "만들", "만드"] },
-  { concept: "plan", kind: "entity", aliases: ["plan", "계획"] },
-  { concept: "translation", kind: "entity", aliases: ["translation", "번역"] },
-  { concept: "only", kind: "modifier", aliases: ["only", "전용", "배타"] },
-  { concept: "original", kind: "entity", aliases: ["original", "원음"] },
-  { concept: "check", kind: "action", aliases: ["check", "확인"] },
-  { concept: "audio", kind: "entity", aliases: ["audio", "음성"] },
-  { concept: "session", kind: "entity", aliases: ["session", "세션"] },
-  { concept: "resumption", kind: "entity", aliases: ["resumption", "resume", "재개"] },
-  { concept: "keep", kind: "action", aliases: ["keep", "retain", "maintain", "유지"] },
-  { concept: "handle", kind: "entity", aliases: ["handle", "핸들"] },
-  { concept: "remove", kind: "action", aliases: ["remove", "clear", "제거", "지우", "비우"] },
-  { concept: "once", kind: "modifier", aliases: ["once", "단일"] },
-  { concept: "retry", kind: "action", aliases: ["retry", "재시도"] },
-  { concept: "cleanup", kind: "action", aliases: ["cleanup", "정리"] },
-  { concept: "meeting", kind: "entity", aliases: ["meeting", "회의"] },
-  { concept: "participant", kind: "entity", aliases: ["participant", "참가자", "개인"] },
-  { concept: "mode", kind: "entity", aliases: ["mode", "모드"] },
-  { concept: "restore", kind: "action", aliases: ["restore", "return", "복귀", "돌아"] },
-  { concept: "apply", kind: "action", aliases: ["apply", "적용", "전환"] },
-  { concept: "track", kind: "entity", aliases: ["track", "트랙"] },
-  { concept: "hold", kind: "modifier", aliases: ["hold", "대기"] },
-  { concept: "drain", kind: "action", aliases: ["drain", "드레인"] },
-  { concept: "close", kind: "action", aliases: ["close", "닫", "중지", "중단"] },
-  { concept: "next", kind: "modifier", aliases: ["next", "다음"] },
-  { concept: "subscription", kind: "entity", aliases: ["subscription", "subscribe", "구독"] },
-  { concept: "order", kind: "action", aliases: ["order", "sequence", "순서"] },
-  { concept: "browser", kind: "entity", aliases: ["browser", "브라우저"] },
-  { concept: "playout", kind: "entity", aliases: ["playout", "재생"] },
-  { concept: "failure", kind: "entity", aliases: ["failure", "실패"] },
-  { concept: "event", kind: "entity", aliases: ["event", "이벤트", "사건"] },
-  { concept: "recorder", kind: "entity", aliases: ["recorder", "기록"] },
-  { concept: "correlated", kind: "modifier", aliases: ["correlated", "상관"] },
-  { concept: "timeline", kind: "entity", aliases: ["timeline", "타임라인"] },
-  { concept: "expired", kind: "modifier", aliases: ["expired", "만료"] },
-  { concept: "reconnect", kind: "action", aliases: ["reconnect", "재연결"] },
-  { concept: "socket", kind: "entity", aliases: ["socket", "소켓"] },
-  { concept: "contaminate", kind: "action", aliases: ["contaminate", "오염"] },
-  { concept: "wait", kind: "action", aliases: ["wait", "기다"] },
-  { concept: "bridge", kind: "entity", aliases: ["bridge", "브리지"] },
-  { concept: "microphone", kind: "entity", aliases: ["microphone", "마이크"] },
-  { concept: "prevent-residue", kind: "action", aliases: ["prevent", "남기지"] },
-  { concept: "privacy", kind: "entity", aliases: ["privacy", "개인정보"] },
-  { concept: "safe", kind: "modifier", aliases: ["safe", "안전"] },
-  { concept: "allowlist", kind: "entity", aliases: ["allowlist", "허용"] },
-  { concept: "field", kind: "entity", aliases: ["field", "필드"] },
-  { concept: "memory", kind: "entity", aliases: ["memory", "메모리"] },
-  { concept: "store", kind: "action", aliases: ["store", "storage", "보관", "저장"] },
-  { concept: "end", kind: "modifier", aliases: ["end", "종료"] },
-  { concept: "dispose", kind: "action", aliases: ["dispose", "discard", "delete", "폐기", "삭제"] },
-  { concept: "example", kind: "entity", aliases: ["example", "예제"] },
-  { concept: "package", kind: "entity", aliases: ["package", "패키지"] },
-  { concept: "runtime", kind: "entity", aliases: ["runtime", "실행"] },
-  { concept: "dependency", kind: "entity", aliases: ["dependency", "relationship", "relation", "의존", "관계", "연결"] },
-  { concept: "separate", kind: "modifier", aliases: ["separate", "independent", "별도", "독립"] },
-  { concept: "command", kind: "entity", aliases: ["command", "cli"] },
-  { concept: "line", kind: "entity", aliases: ["line", "cli"] },
-  { concept: "kr", kind: "entity", aliases: ["kr", "한국어"] },
-  { concept: "ja", kind: "entity", aliases: ["ja", "일본어"] },
+const SCORER_REVISION = "agent-only-gate-v4-frozen-manual";
+const OUTPUT_CONTRACT_VERSION = 3;
+const MANUAL_ADJUDICATION_REVISION = "frozen-agent-manual-adjudication-v1";
+const MANUAL_RULE_REVISION = "frozen-manual-adjudication-v1";
+const REVIEW_POLICY = "two-independent-strict-consensus-with-question-tiebreak-v1";
+const INDEPENDENT_REVIEW_ROLES = [
+  "independent-review-1",
+  "independent-review-2",
 ];
-
-const ASSERTIVE_ENGLISH_FORMS = [
-  "affect", "affected", "affecting", "affects", "applied", "applies",
-  "applying", "are", "can", "change", "changed", "changes", "changing",
-  "checked", "checking", "checks", "closed", "closes", "closing",
-  "connected", "connecting", "connects", "created", "creates", "creating",
-  "depend", "depended", "depending", "depends", "disposed", "disposes",
-  "disposing", "do", "does", "drained", "draining", "drains", "has", "have",
-  "held", "holding", "holds", "impact", "impacted", "impacting", "impacts",
-  "is", "keeping", "keeps", "kept", "removed", "removes", "removing",
-  "restored", "restores", "restoring", "retried", "retries", "retrying",
-  "stored", "stores", "storing", "waited", "waiting", "waits", "was", "were",
-  "will",
+const TIEBREAK_ROLE = "direct-02-tiebreak";
+const TIEBREAK_QUESTION_ID = "direct-02";
+const FROZEN_QUESTION_IDS = [
+  "direct-01",
+  "direct-02",
+  "direct-03",
+  "cross-01",
+  "cross-02",
+  "cross-03",
+  "cross-04",
+  "recovery-01",
+  "recovery-02",
+  "privacy-01",
+  "negative-01",
+  "negative-02",
 ];
-const ASSERTIVE_ENGLISH_FORM_SET = new Set(ASSERTIVE_ENGLISH_FORMS);
-
-const CRITICAL_SEMANTIC_CONCEPTS = [
-  "boundary",
-  "decision",
-  "create",
-  "only",
-  "check",
-  "keep",
-  "remove",
-  "once",
-  "retry",
-  "cleanup",
-  "restore",
-  "apply",
-  "hold",
-  "drain",
-  "close",
-  "next",
-  "order",
-  "reconnect",
-  "contaminate",
-  "wait",
-  "prevent-residue",
-  "store",
-  "end",
-  "dispose",
-];
-const CRITICAL_SEMANTIC_CONCEPT_SET = new Set(CRITICAL_SEMANTIC_CONCEPTS);
-const SEMANTIC_RULE_DEFINITION = {
-  revision: SEMANTIC_RULE_REVISION,
-  answerClauseWindow: ANSWER_CLAUSE_WINDOW,
-  expectedClausePolicy: "sentence-comma-and-technical-subject-conjunction",
-  answerClausePolicy: "sentence",
-  atomNegationPolicy: "directional-marker-plus-negated-identifier-v4",
-  identifierPolicy: "full-or-two-thirds-subtokens",
-  polarityPolicy: "subject-scoped-conflict-between-impact-and-independence-v3",
-  polaritySubjectPolicy: "nfkc-particle-article-camelcase-token-key-v1",
-  impactCuePolicy: "asserted-clause-excluding-conditional-change-v1",
-  softMatch: `${SOFT_MATCH_NUMERATOR}/${SOFT_MATCH_DENOMINATOR}`,
-  criticalMatch: "all",
-  subjectMatch: "leading-technical-or-topic-subject-before-predicate-v4",
-  predicateAttributionPolicy: "versioned-finite-form-with-subject-prefix-v2",
-  assertiveEnglishForms: ASSERTIVE_ENGLISH_FORMS,
-  claimGroupMatch: "all",
-  criticalConcepts: CRITICAL_SEMANTIC_CONCEPTS,
-  stopWords: [...SEMANTIC_STOP_WORDS].sort(),
-  concepts: SEMANTIC_CONCEPT_DEFINITIONS,
+const FROZEN_PASS_GATE = {
+  minimumCorrectAnswers: 10,
+  requiredEvidencedAnswers: 12,
+  maximumInventedFiles: 0,
+  maximumInventedRelations: 0,
+  minimumMedianTimeReduction: 0.25,
 };
-const SEMANTIC_RULE_DIGEST = sha256(JSON.stringify(SEMANTIC_RULE_DEFINITION));
+const MANUAL_ADJUDICATION_RULE = {
+  revision: MANUAL_RULE_REVISION,
+  inputPolicy: "exact-frozen-benchmark-raw-and-table-digests-only",
+  correctnessPolicy: "tracked-question-verdicts-only-no-prose-scoring",
+  reviewPolicy: REVIEW_POLICY,
+  ambiguityPolicy: "direct-02-disagreement-resolved-by-recorded-tiebreak",
+  evidencePolicy: "independent-exact-code-and-test-evidence-comparison",
+  routingPolicy: "unchanged-frozen-agent-context-pass-gate",
+  questionOrder: FROZEN_QUESTION_IDS,
+};
+export const MANUAL_ADJUDICATION_RULE_SHA256 = sha256(
+  JSON.stringify(MANUAL_ADJUDICATION_RULE),
+);
 
-export function adjudicateAgentOnlyGate({
-  benchmarkText,
-  rawText,
-  expectedBenchmarkSha256 = FROZEN_BENCHMARK_SHA256,
-  expectedRawSha256 = FROZEN_RAW_RESULTS_SHA256,
-}) {
-  const { benchmark, raw } = verifyAgentOnlyInputs({
-    benchmarkText,
-    rawText,
-    expectedBenchmarkSha256,
-    expectedRawSha256,
-  });
+const FROZEN_MANUAL_ADJUDICATION_URL = new URL(
+  "../benchmark/agent-only-frozen-adjudication.v1.json",
+  import.meta.url,
+);
 
+export function adjudicateAgentOnlyGate(input) {
+  requireOnlyKeys(input, ["benchmarkText", "rawText"], "Frozen adjudicator input");
+  const { benchmarkText, rawText } = input;
+  const { benchmark, raw } = verifyFrozenAgentOnlyInputs({ benchmarkText, rawText });
+  const manualAdjudication = verifyFrozenManualAdjudicationTable();
   const graphByQuestion = armByQuestion(raw.results, GRAPH_ARM);
   const rgByQuestion = armByQuestion(raw.results, RG_ARM);
+  const manualByQuestion = new Map(
+    manualAdjudication.questions.map((decision) => [decision.questionId, decision]),
+  );
   const questionScores = benchmark.questions.map((question) =>
-    adjudicateQuestion(question, graphByQuestion.get(question.id)),
-  );
-  const correctAnswers = questionScores.filter(({ correct }) => correct).length;
-  const evidencedAnswers = questionScores.filter(({ evidenced }) => evidenced).length;
-  const graphAnswers = [...graphByQuestion.values()];
-  const rgAnswers = [...rgByQuestion.values()];
-  const inventedFiles = sumLengths(graphAnswers, "inventedFiles");
-  const inventedRelations = sumLengths(graphAnswers, "inventedRelations");
-  const graphMedianMs = median(graphAnswers.map(({ answerTimeMs }) => answerTimeMs));
-  const repositorySearchMedianMs = median(rgAnswers.map(({ answerTimeMs }) => answerTimeMs));
-  const medianTimeReduction = round(
-    (repositorySearchMedianMs - graphMedianMs) / repositorySearchMedianMs,
-  );
-
-  const failures = [];
-  if (correctAnswers < benchmark.passGate.minimumCorrectAnswers) {
-    failures.push("correct-answers-below-10");
-  }
-  if (evidencedAnswers < benchmark.passGate.requiredEvidencedAnswers) {
-    failures.push("evidence-missing");
-  }
-  if (inventedFiles > benchmark.passGate.maximumInventedFiles) {
-    failures.push("invented-file");
-  }
-  if (inventedRelations > benchmark.passGate.maximumInventedRelations) {
-    failures.push("invented-relation");
-  }
-  if (medianTimeReduction < benchmark.passGate.minimumMedianTimeReduction) {
-    failures.push("median-time-reduction-below-25-percent");
-  }
+    adjudicateQuestion(
+      question,
+      graphByQuestion.get(question.id),
+      manualByQuestion.get(question.id),
+    ));
+  const gate = scorePreAdjudicatedAgentOnlyGate({
+    questionScores,
+    graphAnswers: [...graphByQuestion.values()],
+    repositorySearchAnswers: [...rgByQuestion.values()],
+  });
 
   return {
     contractVersion: OUTPUT_CONTRACT_VERSION,
@@ -250,9 +96,90 @@ export function adjudicateAgentOnlyGate({
     benchmarkFrozenAt: benchmark.frozenAt,
     analysisSnapshot: benchmark.analysisSnapshot,
     inputDigests: {
-      benchmarkSha256: expectedBenchmarkSha256,
-      rawResultsSha256: expectedRawSha256,
+      benchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      rawResultsSha256: FROZEN_RAW_RESULTS_SHA256,
+      manualAdjudicationSha256: FROZEN_MANUAL_ADJUDICATION_SHA256,
     },
+    manualAdjudication: {
+      revision: manualAdjudication.revision,
+      tableSha256: FROZEN_MANUAL_ADJUDICATION_SHA256,
+      ruleRevision: MANUAL_RULE_REVISION,
+      ruleSha256: MANUAL_ADJUDICATION_RULE_SHA256,
+      reviewMethod: manualAdjudication.reviewMethod,
+    },
+    ...gate,
+    questionScores,
+  };
+}
+
+export function verifyFrozenAgentOnlyInputs(input) {
+  requireOnlyKeys(input, ["benchmarkText", "rawText"], "Frozen input verifier");
+  const { benchmarkText, rawText } = input;
+  requireDigest(benchmarkText, FROZEN_BENCHMARK_SHA256, "Frozen Impact Benchmark");
+  requireDigest(rawText, FROZEN_RAW_RESULTS_SHA256, "Agent Lane raw artifact");
+
+  const benchmark = parseJson(benchmarkText, "Frozen Impact Benchmark");
+  const raw = parseJson(rawText, "Agent Lane raw artifact");
+  validateInputs(benchmark, raw);
+
+  return {
+    benchmark,
+    raw,
+    provenance: {
+      mode: "frozen-digest-provenance-v1",
+      benchmarkSha256: FROZEN_BENCHMARK_SHA256,
+      rawResultsSha256: FROZEN_RAW_RESULTS_SHA256,
+      benchmarkRevision: benchmark.revision,
+      analysisSnapshot: benchmark.analysisSnapshot,
+      provider: raw.provider,
+      orderPolicy: raw.orderPolicy,
+      timeoutMs: raw.timeoutMs,
+      completedRuns: raw.completedRuns,
+    },
+  };
+}
+
+function requireOnlyKeys(value, expectedKeys, label) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !sameOrderedValues(Object.keys(value).sort(), [...expectedKeys].sort())
+  ) {
+    throw new TypeError(`${label} accepts only ${expectedKeys.join(" and ")}`);
+  }
+}
+
+export function scorePreAdjudicatedAgentOnlyGate({
+  questionScores,
+  graphAnswers,
+  repositorySearchAnswers,
+}) {
+  validatePreAdjudicatedFixture({
+    questionScores,
+    graphAnswers,
+    repositorySearchAnswers,
+  });
+  const correctAnswers = questionScores.filter(({ correct }) => correct).length;
+  const evidencedAnswers = questionScores.filter(({ evidenced }) => evidenced).length;
+  const inventedFiles = sumLengths(graphAnswers, "inventedFiles");
+  const inventedRelations = sumLengths(graphAnswers, "inventedRelations");
+  const graphMedianMs = median(graphAnswers.map(({ answerTimeMs }) => answerTimeMs));
+  const repositorySearchMedianMs = median(
+    repositorySearchAnswers.map(({ answerTimeMs }) => answerTimeMs),
+  );
+  const medianTimeReduction = round(
+    (repositorySearchMedianMs - graphMedianMs) / repositorySearchMedianMs,
+  );
+  const failures = gateFailures({
+    correctAnswers,
+    evidencedAnswers,
+    inventedFiles,
+    inventedRelations,
+    medianTimeReduction,
+  });
+
+  return {
     resultRouting: failures.length === 0 ? "Agent Context Candidate" : "Stop Rule",
     failures,
     metrics: {
@@ -264,53 +191,106 @@ export function adjudicateAgentOnlyGate({
       repositorySearchMedianMs,
       medianTimeReduction,
     },
-    questionScores,
   };
 }
 
-export function verifyFrozenAgentOnlyInputs({
-  benchmarkText,
-  rawText,
-}) {
-  return verifyAgentOnlyInputs({
-    benchmarkText,
-    rawText,
-    expectedBenchmarkSha256: FROZEN_BENCHMARK_SHA256,
-    expectedRawSha256: FROZEN_RAW_RESULTS_SHA256,
-  });
+export function verifyFrozenManualAdjudicationTable({
+  manualAdjudicationText = readFileSync(FROZEN_MANUAL_ADJUDICATION_URL, "utf8"),
+} = {}) {
+  requireDigest(
+    manualAdjudicationText,
+    FROZEN_MANUAL_ADJUDICATION_SHA256,
+    "Frozen manual adjudication table",
+  );
+  const table = parseJson(manualAdjudicationText, "Frozen manual adjudication table");
+  validateManualAdjudicationTable(table);
+  return table;
 }
 
-function verifyAgentOnlyInputs({
-  benchmarkText,
-  rawText,
-  expectedBenchmarkSha256,
-  expectedRawSha256,
-}) {
-  requireDigest(benchmarkText, expectedBenchmarkSha256, "Frozen Impact Benchmark");
-  requireDigest(rawText, expectedRawSha256, "Agent Lane raw artifact");
-
-  const benchmark = parseJson(benchmarkText, "Frozen Impact Benchmark");
-  const raw = parseJson(rawText, "Agent Lane raw artifact");
-  validateInputs(benchmark, raw);
-
-  return {
-    benchmark,
-    raw,
-    provenance: {
-      mode: "frozen-digest-provenance-v1",
-      benchmarkSha256: expectedBenchmarkSha256,
-      rawResultsSha256: expectedRawSha256,
-      benchmarkRevision: benchmark.revision,
-      analysisSnapshot: benchmark.analysisSnapshot,
-      provider: raw.provider,
-      orderPolicy: raw.orderPolicy,
-      timeoutMs: raw.timeoutMs,
-      completedRuns: raw.completedRuns,
-    },
-  };
+function validateManualAdjudicationTable(table) {
+  if (
+    table.schemaVersion !== 1 ||
+    table.revision !== MANUAL_ADJUDICATION_REVISION ||
+    table.benchmarkSha256 !== FROZEN_BENCHMARK_SHA256 ||
+    table.rawResultsSha256 !== FROZEN_RAW_RESULTS_SHA256 ||
+    table.ruleRevision !== MANUAL_RULE_REVISION ||
+    !sameOrderedValues(table.questionOrder, FROZEN_QUESTION_IDS) ||
+    !Array.isArray(table.questions) ||
+    !sameOrderedValues(
+      table.questions.map(({ questionId }) => questionId),
+      FROZEN_QUESTION_IDS,
+    )
+  ) {
+    throw new TypeError("Frozen manual adjudication identity is invalid");
+  }
+  if (
+    table.reviewMethod?.policy !== REVIEW_POLICY ||
+    !sameOrderedValues(
+      table.reviewMethod.independentReviewRoles,
+      INDEPENDENT_REVIEW_ROLES,
+    ) ||
+    table.reviewMethod.tiebreak?.role !== TIEBREAK_ROLE ||
+    table.reviewMethod.tiebreak?.questionId !== TIEBREAK_QUESTION_ID ||
+    table.reviewMethod.tiebreak?.trigger !== "independent-review-disagreement"
+  ) {
+    throw new TypeError("Frozen manual adjudication review method is invalid");
+  }
+  for (const decision of table.questions) validateManualDecision(decision);
 }
 
-function adjudicateQuestion(question, answer) {
+function validateManualDecision(decision) {
+  if (
+    !Number.isInteger(decision.rawSequence) ||
+    decision.rawSequence <= 0 ||
+    decision.arm !== GRAPH_ARM ||
+    typeof decision.correct !== "boolean" ||
+    typeof decision.ambiguity !== "boolean" ||
+    typeof decision.rationale !== "string" ||
+    decision.rationale.trim().length === 0 ||
+    !Array.isArray(decision.reviewProvenance?.independent) ||
+    decision.reviewProvenance.independent.length !== 2
+  ) {
+    throw new TypeError(`Invalid manual adjudication decision: ${decision.questionId}`);
+  }
+  const independent = decision.reviewProvenance.independent;
+  if (
+    !sameOrderedValues(
+      independent.map(({ role }) => role),
+      INDEPENDENT_REVIEW_ROLES,
+    ) ||
+    independent.some(({ verdict }) => !["correct", "incorrect"].includes(verdict))
+  ) {
+    throw new TypeError(`Invalid independent review provenance: ${decision.questionId}`);
+  }
+  const finalVerdict = decision.correct ? "correct" : "incorrect";
+  const verdicts = independent.map(({ verdict }) => verdict);
+  if (decision.questionId === TIEBREAK_QUESTION_ID) {
+    if (
+      decision.ambiguity !== true ||
+      new Set(verdicts).size !== 2 ||
+      decision.reviewProvenance.tiebreak?.role !== TIEBREAK_ROLE ||
+      decision.reviewProvenance.tiebreak?.verdict !== finalVerdict
+    ) {
+      throw new TypeError("direct-02 tiebreak provenance is invalid");
+    }
+    return;
+  }
+  if (
+    decision.ambiguity !== false ||
+    verdicts.some((verdict) => verdict !== finalVerdict) ||
+    decision.reviewProvenance.tiebreak !== null
+  ) {
+    throw new TypeError(`Manual consensus provenance is invalid: ${decision.questionId}`);
+  }
+}
+
+function adjudicateQuestion(question, answer, manualDecision) {
+  if (
+    manualDecision.rawSequence !== answer.sequence ||
+    manualDecision.arm !== answer.arm
+  ) {
+    throw new TypeError(`Frozen manual decision does not match raw record: ${question.id}`);
+  }
   const verified =
     answer.validationStatus === "grounded" &&
     answer.unknown === false &&
@@ -325,21 +305,20 @@ function adjudicateQuestion(question, answer) {
   const matchedTests = expectedTests.filter((value) => actualTests.has(value));
   const missingCode = expectedCode.filter((value) => !actualCode.has(value));
   const missingTests = expectedTests.filter((value) => !actualTests.has(value));
-  const evidenced = verified && missingCode.length === 0 && missingTests.length === 0;
-  const semanticCorrectness = evaluateSemanticCorrectness(
-    question.expectedAnswer.summary,
-    answer.answer,
-    { unknown: answer.unknown },
-  );
-  const correct = semanticCorrectness.correct;
 
   return {
     questionId: question.id,
     validationStatus: answer.validationStatus,
     unknown: answer.unknown,
-    evidenced,
-    correct,
-    semanticCorrectness,
+    evidenced: verified && missingCode.length === 0 && missingTests.length === 0,
+    correct: manualDecision.correct,
+    manualAdjudication: {
+      rawSequence: manualDecision.rawSequence,
+      arm: manualDecision.arm,
+      ambiguity: manualDecision.ambiguity,
+      rationale: manualDecision.rationale,
+      reviewProvenance: manualDecision.reviewProvenance,
+    },
     expectedCodeEvidence: expectedCode,
     matchedCodeEvidence: matchedCode,
     missingCodeEvidence: missingCode,
@@ -350,644 +329,64 @@ function adjudicateQuestion(question, answer) {
   };
 }
 
-function evaluateSemanticCorrectness(expectedSummary, answer, { unknown }) {
-  const expectedPolarity = semanticPolarity(expectedSummary);
-  const answerPolarity = semanticPolarity(answer);
-  const interrogative = /\?\s*$/.test(answer.normalize("NFKC").trim());
-  const answerClauses = splitAnswerClauses(answer);
-  const answerWindows = clauseWindows(answerClauses).map(({ text, indexes }) => ({
-    indexes,
-    text,
-    atoms: semanticAtoms(text),
-    assertive: clauseIsAssertive(text),
-  }));
-  const expectedClauses = splitExpectedClaimClauses(expectedSummary)
-    .map((text) => ({ text, atoms: semanticAtoms(text) }))
-    .filter(({ atoms }) => atoms.length > 0);
-
-  let inheritedSubjectAtoms = [];
-  const claimGroups = expectedClauses.map(({ text, atoms }, index) => {
-    const ownSubjectAtoms = subjectAtomsForClaim(text, atoms);
-    const subjectAtoms = ownSubjectAtoms.length > 0
-      ? ownSubjectAtoms
-      : inheritedSubjectAtoms;
-    if (ownSubjectAtoms.length > 0) inheritedSubjectAtoms = ownSubjectAtoms;
-    return scoreClaimGroup({
-      index,
-      text,
-      atoms,
-      subjectAtoms,
-      answerWindows,
-      polarityCompatible: expectedPolarity === answerPolarity,
-    });
-  });
-
-  const failureCodes = [];
-  if (unknown) failureCodes.push("answer-unknown");
-  if (interrogative) failureCodes.push("answer-interrogative");
-  if (answerPolarity === "conflict") failureCodes.push("polarity-conflict");
-  if (
-    answerPolarity === "contradictory" ||
-    claimGroups.some(({ contradictedCriticalAtoms, contradictedSubjectAtoms }) =>
-      contradictedCriticalAtoms.length > 0 || contradictedSubjectAtoms.length > 0)
-  ) {
-    failureCodes.push("answer-contradictory");
-  }
-  if (expectedPolarity !== answerPolarity) failureCodes.push("polarity-mismatch");
-  if (claimGroups.length === 0) failureCodes.push("expected-claims-empty");
-  if (claimGroups.some(({ passed }) => !passed)) failureCodes.push("claim-group-mismatch");
-  const correct = failureCodes.length === 0;
-
-  return {
-    ruleRevision: SEMANTIC_RULE_REVISION,
-    ruleDigest: SEMANTIC_RULE_DIGEST,
-    expectedPolarity,
-    answerPolarity,
-    guards: {
-      unknown,
-      interrogative,
-      polarityConflict: answerPolarity === "conflict",
-      polarityCompatible: expectedPolarity === answerPolarity,
-    },
-    claimGroups,
-    failureCodes,
-    correct,
-  };
-}
-
-function scoreClaimGroup({
-  index,
-  text,
-  atoms,
-  subjectAtoms,
-  answerWindows,
-  polarityCompatible,
+function gateFailures({
+  correctAnswers,
+  evidencedAnswers,
+  inventedFiles,
+  inventedRelations,
+  medianTimeReduction,
 }) {
-  const criticalAtoms = atoms.filter(({ concept }) =>
-    CRITICAL_SEMANTIC_CONCEPT_SET.has(concept));
-  const softAtoms = atoms.filter(({ concept }) =>
-    !CRITICAL_SEMANTIC_CONCEPT_SET.has(concept));
-  const requiredSoftMatches = Math.ceil(
-    (softAtoms.length * SOFT_MATCH_NUMERATOR) / SOFT_MATCH_DENOMINATOR,
-  );
-  const allAnswerAtoms = answerWindows.flatMap(({ atoms: windowAtoms }) => windowAtoms);
-  const contradictedSubjectAtoms = subjectAtoms
-    .filter((expectedAtom) => allAnswerAtoms.some((answerAtom) =>
-      answerAtom.concept === expectedAtom.concept &&
-      answerAtom.negated !== expectedAtom.negated))
-    .map(({ concept, kind, surface, negated }) => ({ concept, kind, surface, negated }));
-  const subjectMatches = answerWindows.flatMap((window) => {
-    const matchedSubjectAtoms = matchSemanticAtoms(subjectAtoms, window.atoms);
-    const missingSubjectAtoms = missingSemanticAtoms(subjectAtoms, matchedSubjectAtoms);
-    const subjectPassed = subjectAtoms.length > 0 && missingSubjectAtoms.length === 0;
-    return subjectPassed ? [{
-      answerClauseIndexes: window.indexes,
-      matchedSubjectAtoms,
-      text: window.text,
-      assertive: window.assertive,
-    }] : [];
-  });
-  const subjectClauses = subjectMatches.flatMap((match) =>
-    attributedPredicateSegments(match.text, subjectAtoms).map(({ atoms: attributedAtoms }) => ({
-      answerClauseIndexes: match.answerClauseIndexes,
-      matchedSubjectAtoms: match.matchedSubjectAtoms,
-      atoms: attributedAtoms,
-    })));
-  const subjectScopedAtoms = subjectClauses.flatMap(({ atoms }) => atoms);
-  const matchedCriticalAtoms = matchSemanticAtoms(criticalAtoms, subjectScopedAtoms);
-  const matchedSoftAtoms = matchSemanticAtoms(softAtoms, subjectScopedAtoms);
-  const matchedSubjectAtoms = matchSemanticAtoms(subjectAtoms, subjectScopedAtoms);
-  const missingCriticalAtoms = missingSemanticAtoms(criticalAtoms, matchedCriticalAtoms);
-  const missingSoftAtoms = missingSemanticAtoms(softAtoms, matchedSoftAtoms);
-  const missingSubjectAtoms = missingSemanticAtoms(subjectAtoms, matchedSubjectAtoms);
-  const contradictedCriticalAtoms = criticalAtoms
-    .filter((expectedAtom) => subjectScopedAtoms.some((answerAtom) =>
-      answerAtom.concept === expectedAtom.concept &&
-      answerAtom.negated !== expectedAtom.negated))
-    .map(({ concept, kind, surface, negated }) => ({ concept, kind, surface, negated }));
-  const criticalPassed =
-    missingCriticalAtoms.length === 0 && contradictedCriticalAtoms.length === 0;
-  const softPassed = matchedSoftAtoms.length >= requiredSoftMatches;
-  const subjectPassed =
-    subjectMatches.length > 0 && contradictedSubjectAtoms.length === 0;
-  const predicateAttributionPassed = subjectClauses.length > 0;
-  const passed =
-    polarityCompatible && criticalPassed && softPassed && subjectPassed &&
-    predicateAttributionPassed;
-  const failureCodes = [];
-  if (!polarityCompatible) failureCodes.push("polarity-mismatch");
-  if (missingCriticalAtoms.length > 0) failureCodes.push("critical-atoms-missing");
-  if (contradictedCriticalAtoms.length > 0) failureCodes.push("critical-atom-contradicted");
-  if (!softPassed) failureCodes.push("soft-atom-coverage-below-two-thirds");
-  if (!subjectPassed) failureCodes.push("subject-atom-missing");
-  if (contradictedSubjectAtoms.length > 0) failureCodes.push("subject-atom-contradicted");
-  if (!predicateAttributionPassed) failureCodes.push("predicate-attribution-missing");
-
-  return {
-    index,
-    expectedClause: text,
-    criticalAtoms: atomAudit(criticalAtoms),
-    softAtoms: atomAudit(softAtoms),
-    requiredSoftMatches,
-    subjectAtoms: atomAudit(subjectAtoms),
-    subjectClauseIndexes: subjectMatches.flatMap(({ answerClauseIndexes }) =>
-      answerClauseIndexes),
-    answerClauseIndexes: subjectClauses.flatMap(({ answerClauseIndexes }) =>
-      answerClauseIndexes),
-    matchedCriticalAtoms,
-    missingCriticalAtoms,
-    matchedSoftAtoms,
-    missingSoftAtoms,
-    matchedSubjectAtoms,
-    missingSubjectAtoms,
-    contradictedSubjectAtoms,
-    contradictedCriticalAtoms,
-    criticalPassed,
-    softPassed,
-    subjectPassed,
-    predicateAttributionPassed,
-    passed,
-    failureCodes,
-  };
-}
-
-function matchSemanticAtoms(expectedAtoms, answerAtoms) {
-  const answerByConcept = new Map(
-    answerAtoms.map((atom) => [semanticAtomKey(atom), atom]),
-  );
-  return expectedAtoms.flatMap((expectedAtom) => {
-    let answerAtom = answerByConcept.get(semanticAtomKey(expectedAtom));
-    let aliasRule;
-    const oppositeIdentifierKey = `${expectedAtom.concept}:${expectedAtom.negated
-      ? "asserted"
-      : "negated"}`;
-    if (
-      !answerAtom &&
-      expectedAtom.identifierSubconcepts?.length > 0 &&
-      !answerByConcept.has(oppositeIdentifierKey)
-    ) {
-      const matchedSubconcepts = expectedAtom.identifierSubconcepts.filter((concept) =>
-        answerByConcept.has(`${concept}:asserted`));
-      const required = Math.ceil(
-        (expectedAtom.identifierSubconcepts.length * SOFT_MATCH_NUMERATOR) /
-          SOFT_MATCH_DENOMINATOR,
-      );
-      if (matchedSubconcepts.length >= required) {
-        answerAtom = {
-          surface: matchedSubconcepts
-            .map((concept) => answerByConcept.get(`${concept}:asserted`).surface)
-            .join(" + "),
-        };
-        aliasRule = "identifier-subtokens-two-thirds";
-      }
-    }
-    if (!answerAtom) return [];
-    return [{
-      concept: expectedAtom.concept,
-      kind: expectedAtom.kind,
-      negated: expectedAtom.negated,
-      expectedSurface: expectedAtom.surface,
-      answerSurface: answerAtom.surface,
-      aliasRule: aliasRule ?? (expectedAtom.surface === answerAtom.surface
-        ? "normalized-token"
-        : "versioned-ko-en-alias"),
-    }];
-  });
-}
-
-function missingSemanticAtoms(expectedAtoms, matchedAtoms) {
-  const matched = new Set(matchedAtoms.map(semanticAtomKey));
-  return atomAudit(expectedAtoms.filter((atom) => !matched.has(semanticAtomKey(atom))));
-}
-
-function atomAudit(atoms) {
-  return atoms.map(({ concept, kind, surface, identifierSubconcepts, negated = false }) => ({
-    concept,
-    kind,
-    surface,
-    negated,
-    ...(identifierSubconcepts ? { identifierSubconcepts } : {}),
-  }));
-}
-
-function semanticAtomKey({ concept, negated = false }) {
-  return `${concept}:${negated ? "negated" : "asserted"}`;
-}
-
-function semanticPolarity(value) {
-  const normalized = normalizeSemanticText(value);
-  if (/\?\s*$/.test(value.normalize("NFKC").trim()) || /(?:^|\s)(?:unknown|모름|알\s+수\s+없)/u.test(normalized)) {
-    return "uncertain";
+  const failures = [];
+  if (correctAnswers < FROZEN_PASS_GATE.minimumCorrectAnswers) {
+    failures.push("correct-answers-below-10");
   }
-  if (/(?:정반대|opposite)/u.test(normalized)) return "contradictory";
-
-  const claims = polarityClaims(value);
-  const conflict = claims.some((left) => claims.some((right) =>
-    samePolarityScope(left, right) && (
-      (left.noImpactCue && right.impactOrDependencyCue) ||
-      (left.deniedDependency && right.positiveDependency)
-    )));
-  if (conflict) return "conflict";
-
-  const positive = claims.some(({ impactOrDependencyCue }) => impactOrDependencyCue);
-  if (positive) return "impact";
-  if (claims.some(({ noImpactCue, deniedDependency }) =>
-    noImpactCue || deniedDependency)) return "no-impact";
-  return "unspecified";
-}
-
-function polarityClaims(value) {
-  let inheritedSubject = null;
-  return polarityClauses(value).map((clause) => {
-    const subject = polaritySubject(clause) ?? inheritedSubject;
-    if (subject) inheritedSubject = subject;
-    const normalized = normalizeSemanticText(clause);
-    const impactCues = semanticCueStates(clause, isImpactCueToken);
-    const dependencyCues = semanticCueStates(clause, (token) =>
-      /^(?:연결|의존|관계|connect|depend|dependency|relation|relationship)/u.test(token));
-    const independenceCues = semanticCueStates(clause, (token) =>
-      /^(?:별도|독립|separate|independent)/u.test(token));
-    const explicitNoImpact = impactCues.negated ||
-      /영향[^.!?]{0,20}(?:없|않)/u.test(normalized) ||
-      /(?:no|without)\s+(?:direct\s+)?impact/u.test(normalized);
-    const deniedDependency = dependencyCues.negated ||
-      /(?:관련|연결|의존|dependency|relationship|relation)[^.!?]{0,20}(?:없|않)/u.test(normalized) ||
-      /(?:no|not|without)\s+(?:direct\s+)?(?:connection|dependency|relationship|relation)/u.test(normalized);
-    const positiveDependency = hasAssertedDirectDependency(clause);
-    const noImpactCue = explicitNoImpact || independenceCues.asserted;
-    const impactOrDependencyCue = impactCues.asserted || positiveDependency;
-    return {
-      subject,
-      noImpactCue,
-      deniedDependency,
-      positiveDependency,
-      impactOrDependencyCue,
-    };
-  });
-}
-
-function polaritySubject(clause) {
-  const subjectSource = clause
-    .normalize("NFKC")
-    .replace(/^\s*(?:and|but|however|while|yet|그리고|그러나|하지만)\s+/iu, "");
-  const normalized = normalizeSemanticText(subjectSource);
-  const leadingIdentifier = technicalIdentifiers(subjectSource)
-    .find((identifier) => normalized.startsWith(normalizeSemanticText(identifier)));
-  if (leadingIdentifier) {
-    return canonicalPolaritySubject(semanticTokens(leadingIdentifier));
+  if (evidencedAnswers < FROZEN_PASS_GATE.requiredEvidencedAnswers) {
+    failures.push("evidence-missing");
   }
-
-  const tokens = semanticTokens(subjectSource);
-  const topicIndex = tokens.findIndex((token) =>
-    /^[a-z0-9가-힣]+(?:은|는|이|가)$/u.test(token));
-  const englishPredicateIndex = assertivePredicateContexts(subjectSource)
-    .flatMap(({ tokens: segmentTokens, predicateIndexes }) =>
-      predicateIndexes
-        .filter((predicateIndex) =>
-          ASSERTIVE_ENGLISH_FORM_SET.has(segmentTokens[predicateIndex]))
-        .map((predicateIndex) => ({ segmentTokens, predicateIndex })))
-    .at(0);
-  const subjectTokens = topicIndex > 0
-    ? tokens.slice(0, topicIndex + 1)
-    : englishPredicateIndex?.segmentTokens.slice(0, englishPredicateIndex.predicateIndex) ?? [];
-  const normalizedSubjectTokens = subjectTokens
-    .map((token) => koreanParticleForms(token).at(-1))
-    .filter((token) => !/^(?:a|an|the|directly|그리고|그러나|하지만)$/u.test(token));
-  if (/^(?:he|it|she|that|they|this|we|그것)$/u.test(normalizedSubjectTokens[0] ?? "")) {
-    return null;
+  if (inventedFiles > FROZEN_PASS_GATE.maximumInventedFiles) {
+    failures.push("invented-file");
   }
-  if (normalizedSubjectTokens.length === 0) return null;
-  return canonicalPolaritySubject(normalizedSubjectTokens);
-}
-
-function canonicalPolaritySubject(tokens) {
-  const key = tokens
-    .map((token) => koreanParticleForms(token).at(-1))
-    .join("");
-  return key ? `subject:${key}` : null;
-}
-
-function samePolarityScope(left, right) {
-  return !left.subject || !right.subject || left.subject === right.subject;
-}
-
-function hasAssertedDirectDependency(value) {
-  return polarityClauses(value).some((clause) => {
-    const normalized = normalizeSemanticText(clause);
-    const tokens = semanticTokens(clause);
-    const sameRuntimeStart = findTokenSequence(tokens, ["same", "runtime", "unit"]);
-    const koreanRuntimeStart = findTokenSequence(tokens, ["같은", "실행", "단위"]);
-    if (
-      (sameRuntimeStart >= 0 &&
-        !tokenSequenceIsNegated(tokens, sameRuntimeStart, 3)) ||
-      (koreanRuntimeStart >= 0 &&
-        !tokenSequenceIsNegated(tokens, koreanRuntimeStart, 3))
-    ) {
-      return true;
-    }
-    if (!/(?:직접|direct)/u.test(normalized)) return false;
-    return semanticCueStates(clause, (token) =>
-      /^(?:연결|의존|관계|connect|depend|dependency|relation|relationship)/u.test(token))
-      .asserted;
-  });
-}
-
-function findTokenSequence(tokens, expected) {
-  for (let start = 0; start <= tokens.length - expected.length; start += 1) {
-    if (expected.every((token, offset) =>
-      koreanParticleForms(tokens[start + offset]).includes(token))) {
-      return start;
-    }
+  if (inventedRelations > FROZEN_PASS_GATE.maximumInventedRelations) {
+    failures.push("invented-relation");
   }
-  return -1;
-}
-
-function tokenSequenceIsNegated(tokens, start, length) {
-  return Array.from({ length }, (_, offset) => start + offset)
-    .some((index) => tokenIsNegated(tokens, index));
-}
-
-function isImpactCueToken(token, index, tokens) {
-  if (/^변경(?:하면|할|시)/u.test(token)) return false;
-  if (/^change/u.test(token) && tokens
-    .slice(Math.max(0, index - 2), index)
-    .some((value) => /^(?:if|when)$/u.test(value))) {
-    return false;
+  if (medianTimeReduction < FROZEN_PASS_GATE.minimumMedianTimeReduction) {
+    failures.push("median-time-reduction-below-25-percent");
   }
-  return /^(?:영향|달라|바꾸|변경|affect|impact|change)/u.test(token);
+  return failures;
 }
 
-function semanticCueStates(value, matcher) {
-  let asserted = false;
-  let negated = false;
-  for (const clause of polarityClauses(value)) {
-    const tokens = semanticTokens(clause);
-    const assertive = clauseIsAssertive(clause);
-    for (const [index, token] of tokens.entries()) {
-      if (!matcher(token, index, tokens)) continue;
-      if (tokenIsNegated(tokens, index)) {
-        negated = true;
-      } else if (assertive) {
-        asserted = true;
-      }
-    }
+function validatePreAdjudicatedFixture({
+  questionScores,
+  graphAnswers,
+  repositorySearchAnswers,
+}) {
+  if (
+    !Array.isArray(questionScores) ||
+    !sameOrderedValues(
+      questionScores.map(({ questionId }) => questionId),
+      FROZEN_QUESTION_IDS,
+    ) ||
+    questionScores.some(({ correct, evidenced }) =>
+      typeof correct !== "boolean" || typeof evidenced !== "boolean")
+  ) {
+    throw new TypeError("Pre-adjudicated question scores are invalid");
   }
-  return { asserted, negated };
+  validateMetricAnswers(graphAnswers, "graph");
+  validateMetricAnswers(repositorySearchAnswers, "repository search");
 }
 
-function polarityClauses(value) {
-  return value
-    .normalize("NFKC")
-    .split(/[,.!?;]+|\b(?:but|while)\b/iu)
-    .map((clause) => clause.trim())
-    .filter(Boolean);
-}
-
-function clauseIsAssertive(value) {
-  return assertivePredicateContexts(value)
-    .some(({ predicateIndexes }) => predicateIndexes.length > 0);
-}
-
-function assertivePredicateContexts(value) {
-  return value
-    .normalize("NFKC")
-    .split(/,+/u)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-    .map((text) => {
-      const tokens = semanticTokens(text);
-      return { text, tokens, predicateIndexes: assertivePredicateIndexes(tokens) };
-    });
-}
-
-function assertivePredicateIndexes(tokens) {
-  const indexes = [];
-  if (tokens.length > 1 && /[가-힣](?:다|요|지만)$/u.test(tokens.at(-1))) {
-    indexes.push(tokens.length - 1);
+function validateMetricAnswers(answers, label) {
+  if (
+    !Array.isArray(answers) ||
+    answers.length !== FROZEN_QUESTION_IDS.length ||
+    answers.some((answer) =>
+      !Number.isFinite(answer.answerTimeMs) ||
+      answer.answerTimeMs <= 0 ||
+      !Array.isArray(answer.inventedFiles) ||
+      !Array.isArray(answer.inventedRelations))
+  ) {
+    throw new TypeError(`Pre-adjudicated ${label} metrics are invalid`);
   }
-  for (const [index, token] of tokens.entries()) {
-    if (
-      ASSERTIVE_ENGLISH_FORM_SET.has(token) &&
-      index > 0 &&
-      index < tokens.length - 1
-    ) {
-      indexes.push(index);
-    }
-  }
-  return indexes;
-}
-
-function attributedPredicateSegments(value, subjectAtoms) {
-  const attributed = assertivePredicateContexts(value).flatMap(({ text, tokens, predicateIndexes }) =>
-    predicateIndexes.flatMap((predicateIndex) => {
-      const prefixAtoms = semanticAtoms(tokens.slice(0, predicateIndex).join(" "));
-      const matched = matchSemanticAtoms(subjectAtoms, prefixAtoms);
-      return subjectAtoms.length > 0 &&
-        missingSemanticAtoms(subjectAtoms, matched).length === 0
-        ? [{ text, atoms: semanticAtoms(text) }]
-        : [];
-    }));
-  if (attributed.length > 0) return attributed;
-
-  const tokens = semanticTokens(value);
-  if (tokens.length <= 1 || !/[가-힣](?:다|요|지만)$/u.test(tokens.at(-1))) return [];
-  const prefixAtoms = semanticAtoms(tokens.slice(0, -1).join(" "));
-  const matched = matchSemanticAtoms(subjectAtoms, prefixAtoms);
-  return subjectAtoms.length > 0 &&
-    missingSemanticAtoms(subjectAtoms, matched).length === 0
-    ? [{ text: value, atoms: semanticAtoms(value) }]
-    : [];
-}
-
-function semanticAtoms(value) {
-  const atoms = [];
-  const tokens = semanticTokens(value);
-  for (const identifier of technicalIdentifiers(value)) {
-    for (const negated of identifierNegationStates(tokens, identifier)) {
-      atoms.push({
-        concept: `identifier:${identifier.normalize("NFKC").toLocaleLowerCase("und")}`,
-        kind: "entity",
-        surface: identifier,
-        negated,
-        identifierSubconcepts: identifierConcepts(identifier),
-      });
-    }
-  }
-  for (const [index, token] of tokens.entries()) {
-    const definitions = definitionsForToken(token);
-    if (definitions.length === 0) {
-      const forms = koreanParticleForms(token);
-      const canonical = forms.at(-1);
-      if (
-        !forms.some((form) => SEMANTIC_STOP_WORDS.has(form)) &&
-        canonical.length > 1
-      ) {
-        atoms.push({
-          concept: canonical,
-          kind: "entity",
-          surface: token,
-          negated: tokenIsNegated(tokens, index),
-        });
-      }
-      continue;
-    }
-    for (const definition of definitions) {
-      atoms.push({
-        concept: definition.concept,
-        kind: definition.kind,
-        surface: token,
-        negated: tokenIsNegated(tokens, index),
-      });
-    }
-  }
-  const unique = new Map();
-  for (const atom of atoms) {
-    const key = semanticAtomKey(atom);
-    if (!unique.has(key)) unique.set(key, atom);
-  }
-  return [...unique.values()];
-}
-
-function identifierNegationStates(tokens, identifier) {
-  const identifierTokens = semanticTokens(identifier);
-  const states = [];
-  for (let start = 0; start <= tokens.length - identifierTokens.length; start += 1) {
-    const matches = identifierTokens.every((token, offset) =>
-      tokens[start + offset] === token);
-    if (!matches) continue;
-    states.push(identifierTokens.some((_, offset) =>
-      tokenIsNegated(tokens, start + offset)));
-  }
-  return states.length > 0 ? states : [false];
-}
-
-function tokenIsNegated(tokens, index) {
-  const prefix = tokens.slice(Math.max(0, index - 2), index + 1);
-  const koreanSuffix = tokens.slice(index + 1, index + 4);
-  return (
-    prefix.some((value) => /^(?:않|없|아닌|아니|못|not|never|without)/u.test(value)) ||
-    koreanSuffix.some((value) => /^(?:않|없|아닌|아니|못)/u.test(value))
-  );
-}
-
-function subjectAtomsForClaim(text, atoms) {
-  const normalizedText = text.normalize("NFKC").trim();
-  const leadingIdentifier = technicalIdentifiers(normalizedText)
-    .find((identifier) => normalizedText.startsWith(identifier));
-  if (leadingIdentifier) {
-    const concept = `identifier:${leadingIdentifier.normalize("NFKC").toLocaleLowerCase("und")}`;
-    const identifierAtom = atoms.find((atom) => atom.concept === concept);
-    return identifierAtom ? [identifierAtom] : [];
-  }
-  const tokens = semanticTokens(normalizedText);
-  const topicIndex = tokens.findIndex((token, index) =>
-    index < 6 && /^[a-z0-9가-힣]+(?:은|는|이|가)$/u.test(token));
-  const englishPredicate = assertivePredicateContexts(normalizedText)
-    .flatMap(({ tokens: segmentTokens, predicateIndexes }) =>
-      predicateIndexes
-        .filter((predicateIndex) =>
-          ASSERTIVE_ENGLISH_FORM_SET.has(segmentTokens[predicateIndex]))
-        .map((predicateIndex) => ({ segmentTokens, predicateIndex })))
-    .at(0);
-  const subjectTokens = topicIndex >= 0
-    ? tokens.slice(0, topicIndex + 1)
-    : englishPredicate?.segmentTokens.slice(0, englishPredicate.predicateIndex) ?? [];
-  if (subjectTokens.length > 0) {
-    const subjectEntity = semanticAtoms(subjectTokens.join(" "))
-      .find(({ kind }) => kind === "entity");
-    if (subjectEntity) return [subjectEntity];
-  }
-  const firstEntity = atoms.find(({ kind }) => kind === "entity");
-  return firstEntity ? [firstEntity] : [];
-}
-
-function identifierConcepts(identifier) {
-  const concepts = [];
-  for (const token of normalizeSemanticText(identifier).split(" ")) {
-    const definitions = definitionsForToken(token);
-    const values = definitions.length > 0
-      ? definitions.map(({ concept }) => concept)
-      : [token];
-    for (const concept of values) {
-      if (!concepts.includes(concept)) concepts.push(concept);
-    }
-  }
-  return concepts;
-}
-
-function definitionsForToken(token) {
-  const forms = koreanParticleForms(token);
-  return SEMANTIC_CONCEPT_DEFINITIONS.filter(({ aliases }) =>
-    aliases.some((alias) => forms.some((form) => semanticAliasMatches(form, alias))));
-}
-
-function semanticAliasMatches(token, alias) {
-  if (token === alias) return true;
-  if (/^[가-힣]{2,}$/u.test(alias) && token.startsWith(alias)) return true;
-  if (/^[a-z][a-z0-9-]+$/u.test(alias) && token === `${alias}s`) return true;
-  return false;
-}
-
-function technicalIdentifiers(value) {
-  return value.normalize("NFKC").match(/\b[A-Za-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/g) ?? [];
-}
-
-function semanticTokens(value) {
-  return normalizeSemanticText(value).split(" ").filter(Boolean);
-}
-
-function normalizeSemanticText(value) {
-  return value
-    .normalize("NFKC")
-    .replace(/정확히\s+한\s+번(?:만)?/gu, " once ")
-    .replace(/한\s+번(?:만)?/gu, " once ")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Za-z0-9])([가-힣])/g, "$1 $2")
-    .replace(/([가-힣])([A-Za-z0-9])/g, "$1 $2")
-    .toLocaleLowerCase("und")
-    .replace(/[^a-z0-9가-힣]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function koreanParticleForms(token) {
-  if (!/^[가-힣]{3,}$/u.test(token)) return [token];
-  const stripped = token.replace(/(?:에서는|에서|으로|에게|까지|부터|처럼|보다|하고|이며|은|는|이|가|을|를|과|와)$/u, "");
-  return stripped.length >= 2 && stripped !== token ? [token, stripped] : [token];
-}
-
-function splitExpectedClaimClauses(value) {
-  return value
-    .normalize("NFKC")
-    .split(/[,;!?]+|(?<=[가-힣])\.(?=\s|$)/u)
-    .flatMap((clause) => clause.split(/(?:와|과)\s+(?=[A-Z])/u))
-    .map((clause) => clause.trim())
-    .filter(Boolean);
-}
-
-function splitAnswerClauses(value) {
-  return value
-    .normalize("NFKC")
-    .split(/[;!?]+|(?<=[가-힣])\.(?=\s|$)/u)
-    .map((clause) => clause.trim())
-    .filter(Boolean);
-}
-
-function clauseWindows(clauses) {
-  const windows = [];
-  for (let start = 0; start < clauses.length; start += 1) {
-    for (
-      let length = 1;
-      length <= ANSWER_CLAUSE_WINDOW && start + length <= clauses.length;
-      length += 1
-    ) {
-      windows.push({
-        indexes: Array.from({ length }, (_, offset) => start + offset),
-        text: clauses.slice(start, start + length).join(". "),
-      });
-    }
-  }
-  return windows;
 }
 
 function validateInputs(benchmark, raw) {
@@ -996,19 +395,14 @@ function validateInputs(benchmark, raw) {
     !benchmark.frozenAt ||
     !benchmark.analysisSnapshot ||
     !Array.isArray(benchmark.questions) ||
-    benchmark.questions.length !== 12 ||
-    new Set(benchmark.questions.map(({ id }) => id)).size !== 12
+    !sameOrderedValues(
+      benchmark.questions.map(({ id }) => id),
+      FROZEN_QUESTION_IDS,
+    )
   ) {
     throw new TypeError("Frozen Impact Benchmark identity is invalid");
   }
-  const gate = benchmark.passGate;
-  if (
-    gate?.minimumCorrectAnswers !== 10 ||
-    gate.requiredEvidencedAnswers !== 12 ||
-    gate.maximumInventedFiles !== 0 ||
-    gate.maximumInventedRelations !== 0 ||
-    gate.minimumMedianTimeReduction !== 0.25
-  ) {
+  if (!samePassGate(benchmark.passGate)) {
     throw new TypeError("Frozen Agent Context Pass Gate changed");
   }
   for (const question of benchmark.questions) {
@@ -1040,6 +434,11 @@ function validateInputs(benchmark, raw) {
     throw new TypeError("Agent Lane raw artifact identity is invalid");
   }
   validateRuns(benchmark, raw.results);
+}
+
+function samePassGate(gate) {
+  return Object.entries(FROZEN_PASS_GATE)
+    .every(([key, value]) => gate?.[key] === value);
 }
 
 function validateRuns(benchmark, results) {
@@ -1113,6 +512,12 @@ function median(values) {
 
 function round(value) {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function sameOrderedValues(actual, expected) {
+  return Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((value, index) => value === expected[index]);
 }
 
 function requireDigest(text, expected, label) {

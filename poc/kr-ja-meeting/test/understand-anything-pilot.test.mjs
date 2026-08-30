@@ -292,6 +292,12 @@ test("operator docs provide package-cwd commands for every budgeted phase and ad
   assert.match(operatorDocs, /Codex `?0\.151\.0`?/);
   assert.match(operatorDocs, /historical retained evidence|과거 보존 증거/);
   assert.match(operatorDocs, /새(?:로운)? artifact root[\s\S]*prepare/i);
+  assert.match(operatorDocs, /agent-only-gate-v4-frozen-manual/);
+  assert.match(operatorDocs, /agent-only-frozen-adjudication\.v1\.json/);
+  assert.match(operatorDocs, /correct answer: 4\/12/);
+  assert.match(operatorDocs, /direct-02[\s\S]*tiebreak/);
+  assert.match(operatorDocs, /향후 raw[\s\S]*새 benchmark\/adjudication revision[\s\S]*fail-closed/);
+  assert.doesNotMatch(operatorDocs, /expected-summary-subject-bound-claims-v2/);
   assert.match(comparisonDocs, /frozen-digest-provenance-v1/);
   assert.match(comparisonDocs, /exact frozen raw SHA|정확한\s+frozen raw SHA/i);
   assert.match(comparisonDocs, /<NEW_PILOT_ARTIFACT_ROOT>/);

@@ -43,20 +43,24 @@ Agent Lane은 다음 네 조건을 모두 충족해야 한다.
 
 하나라도 충족하지 못하면 Stop Rule을 적용한다. 결과를 확인한 뒤 threshold, expected answer, evidence criteria, raw result를 완화하거나 변경하지 않는다.
 
-현재 동결 결과에서는 Stop Rule이 적용되었다. AIN-7644의 최초 `agent-only-gate-v2`
-기록은 summary의 NFKC exact string만 비교해 correct answer를 0/12로 기록한 historical
-evidence다. 동결 benchmark, raw result, threshold는 바꾸지 않고 의미 비교 계약을
-`agent-only-gate-v3`로 교정해 다시 판정했다. 교정 결과는 다음 측정값이며, 이 도구는
-Agent Context Candidate가 아니고 rollout하지 않는다.
+현재 동결 결과에서는 Stop Rule이 적용되었다. AIN-7644의 `agent-only-gate-v2` 0/12와
+`agent-only-gate-v3` 5/12는 각각 exact-string 비교와 자동 의미 규칙을 사용한 historical
+evidence다. 현재 `agent-only-gate-v4-frozen-manual`은 그 자동 의미 판정기를 실제 판정
+경로에서 폐기했다. 동결 benchmark, raw result, threshold bytes는 바꾸지 않고 두 독립
+review의 strict consensus와 `direct-02` 불일치에 대한 별도 tiebreak를 버전 관리되는
+수동 판정표로 고정했다. 현재 결과는 다음과 같으며, 이 도구는 Agent Context Candidate가
+아니고 rollout하지 않는다.
 
-- correct answer: 5/12 (`direct-01`, `direct-02`, `cross-02`, `negative-01`, `negative-02`)
+- correct answer: 4/12 (`direct-01`, `cross-02`, `negative-01`, `negative-02`)
 - verified code/test evidence: 0/12
 - invented file: 0
 - invented relation: 0
 - graph answer time median: 36,840.065ms
 - `rg` answer time median: 33,217.775ms
 - median time reduction: -10.9% (graph arm이 더 느림)
-- adjudication SHA-256: `3cc28dbc73285f31862233ff1f95bb193830fce76334bf820cc00e425ec90103`
+- manual adjudication table SHA-256: `135fe995bd491f8e5ff5cf9184c2153037bb59f8a7a05d5699f6cd7c7cdda786`
+- manual rule SHA-256: `e205046c9a78211f03bce1ff298916ff131c5e492d1e6ed1298c1bd3bfabf9ab`
+- adjudication SHA-256: `e28b0c63e52ec06bfd17ce94b0b59423eeabfd3cb3df0849464e2af7255b1e4e`
 
 ## 운영 정책
 
@@ -152,30 +156,29 @@ node scripts/understand-anything-pilot.mjs verify-artifact \
 `753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6`
 로, AIN-7643 raw result bytes의 SHA-256을
 `6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0`로 고정한다.
-정답은 raw answer의 의미가 동결된 `expectedAnswer.summary`와 일치하는지로 판정하고,
-근거 충족 여부와 독립적으로 센다. `agent-only-gate-v3`는 question ID나 actual 결과별
-예외 없이 expected summary에서 문장·쉼표와 새 technical subject 앞의 접속 조사 단위로
-claim group을 만든다. NFKC와 하나의 versioned 한국어/영어 software 용어 표를 적용한
-뒤, 각 group에서 action, order, quantifier, exclusivity atom은 전부, 나머지 고유 atom은
-3분의 2 이상 일치해야 한다. 선두 technical identifier 또는 첫 entity를 subject로
-고정하고 각 predicate는 그 subject가 있는 같은 서술형 answer clause 안에서만 인정한다.
-주체가 명시적으로 부정되거나 predicate 없는 keyword 목록이면 incorrect다. 명시적
-같은 주체에 귀속된 impact 또는 direct dependency cue와 no-impact 또는 independent cue가
-함께 있으면 순서나 문장 경계와 무관하게 `conflict`로 fail-closed한다. unknown, 끝이 물음표인 답, polarity
-충돌, 핵심 atom 부정도 incorrect다. 모든 group과 polarity가 통과해야 correct다.
+정답은 tracked `benchmark/agent-only-frozen-adjudication.v1.json`의 수동 verdict만 사용한다.
+이 표는 benchmark SHA, raw SHA, 12개 question ID와 순서, 각 graph-arm raw sequence,
+판정·ambiguity·간결한 rationale, 두 독립 review 역할의 verdict를 함께 고정한다. 두 review가
+일치해야 최종 verdict가 되며, 유일한 불일치인 `direct-02`는 기록된 tiebreak가 incorrect로
+결정했고 `ambiguity: true`로 남긴다. 판정표는 frozen adjudication contract이며 raw answer,
+evidence, timing을 복제하는 Pilot Artifact가 아니다.
 
-semantic rule revision은 `expected-summary-subject-bound-claims-v2`, rule SHA-256은
-`9054f2fb91ed817663bed7ec8700442fab71ac03ea864c888ce2cb83e77f135d`이다.
-scorer output contract는 v2다. 질문별 출력에는 expected clause, critical/soft atom,
-일치·누락 atom, 사용한 alias rule, 비교한 answer clause index, failure code를 남긴다.
-근거는 grounded raw evidence가 동결된 expected code와 test 항목을 모두 포함할 때만
-충족된다. `unsupported`, `unknown`, unverified, invented evidence는 evidence gate에
-유리하게 계산하지 않는다.
+scorer revision은 `agent-only-gate-v4-frozen-manual`, manual rule revision은
+`frozen-manual-adjudication-v1`, output contract는 v3다. 코드가 판정표 SHA와 question
+set/order를 직접 고정하므로 호출자가 다른 digest나 판정표를 선택할 수 없다. 임의 prose를
+keyword나 자동 의미 parser로 채점하는 경로도 없다. 향후 raw 또는 benchmark는 기존 판정기로
+재사용하지 않으며, 명시적인 새 benchmark/adjudication revision과 별도 review 없이
+fail-closed로 거부한다.
+
+correctness와 별도로, evidence는 grounded raw evidence가 동결된 expected code와 test 항목을
+모두 포함할 때만 충족된다. `unsupported`, `unknown`, unverified, invented evidence는 evidence
+gate에 유리하게 계산하지 않는다. timing과 invented file/relationship 수도 raw result에서
+독립적으로 계산하며 동결 threshold를 그대로 적용한다.
 
 ```bash
 # 위 graph adapter와 같은 package cwd에서 실행한다.
 npm run pilot:adjudicate-agent -- \
-  --raw /absolute/path/to/raw-results.json \
+  --raw /absolute/path/to/exact-frozen-raw-results.json \
   --output /absolute/path/to/repository/.ua-pilot/agent-only-gate/adjudication.json
 ```
 
