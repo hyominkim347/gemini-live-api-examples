@@ -1,0 +1,86 @@
+{
+  "artifactVersion": 1,
+  "reviewId": "manual-review-b",
+  "coordinatorSession": "01a04dff-c649-7eb2-b3d4-8c994ec4c6f7",
+  "reviewerCanonicalTask": "/root/remove_developer_lane/final_security_review",
+  "reviewerKind": "codex-agent-task",
+  "recordedAt": "2026-08-30T03:22:27Z",
+  "inputDigests": {
+    "benchmarkSha256": "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6",
+    "rawResultsSha256": "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0"
+  },
+  "questions": [
+    {
+      "questionId": "direct-01",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "종료 임계값이 SpeechActivityDetector의 종료 판정 시점과 자동 utterance boundary를 바꾼다고 정확히 설명한다."
+    },
+    {
+      "questionId": "direct-02",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "foreign-speech 청취 계획은 설명하지만 translation-only와 original-check 동작을 모두 명확히 확정하지 않는다."
+    },
+    {
+      "questionId": "direct-03",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "directional audio translation과 resumption은 다루지만 audio-only 배타 계약을 확정하지 않는다."
+    },
+    {
+      "questionId": "cross-01",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "handle 제거와 1회 retry는 설명하지만 utterance 유지와 meeting cleanup 경로를 명확히 포함하지 않는다."
+    },
+    {
+      "questionId": "cross-02",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "참가자 listening mode 복귀와 browser track 및 gain 전환의 관계를 모두 설명한다."
+    },
+    {
+      "questionId": "cross-03",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "focus와 bridge lifecycle은 언급하지만 drain, close, 다음 구독 순서를 확정하지 않는다."
+    },
+    {
+      "questionId": "cross-04",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "답변이 unknown이라 기대 동작을 설명하지 않는다."
+    },
+    {
+      "questionId": "recovery-01",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "답변이 unknown이라 기대 복구 보장을 설명하지 않는다."
+    },
+    {
+      "questionId": "recovery-02",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "답변이 unknown이라 기대 cleanup 복구 경로를 설명하지 않는다."
+    },
+    {
+      "questionId": "privacy-01",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "safe-field와 메모리 저장 및 삭제 lifecycle은 언급하지만 memory-only와 meeting-end disposal 경계를 명확히 확정하지 않는다."
+    },
+    {
+      "questionId": "negative-01",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "command-line Node 예제와 kr-ja-meeting 사이 dependency 부재와 무영향을 명확히 답한다."
+    },
+    {
+      "questionId": "negative-02",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "Python Twilio 예제가 LiveKit 및 Gemini socket 경로와 분리되어 무영향임을 명확히 답한다."
+    }
+  ]
+}

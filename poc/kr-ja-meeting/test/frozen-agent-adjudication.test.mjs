@@ -9,6 +9,7 @@ import {
   FROZEN_BENCHMARK_SHA256,
   FROZEN_MANUAL_ADJUDICATION_SHA256,
   FROZEN_RAW_RESULTS_SHA256,
+  FROZEN_REVIEW_ARTIFACT_SHA256,
   MANUAL_ADJUDICATION_RULE_SHA256,
   scorePreAdjudicatedAgentOnlyGate,
   verifyFrozenManualAdjudicationTable,
@@ -95,7 +96,7 @@ test("the exact frozen manual adjudication records four correct answers and Stop
   assert.deepEqual(result.scorer, {
     revision: "agent-only-gate-v4-frozen-manual",
     inputContractVersion: 1,
-    outputContractVersion: 3,
+    outputContractVersion: 4,
   });
   assert.equal(result.resultRouting, "Stop Rule");
   assert.equal(result.metrics.correctAnswers, 4);
@@ -108,6 +109,10 @@ test("the exact frozen manual adjudication records four correct answers and Stop
   assert.equal(direct02.manualAdjudication.ambiguity, true);
   assert.equal(result.manualAdjudication.tableSha256, FROZEN_MANUAL_ADJUDICATION_SHA256);
   assert.equal(result.manualAdjudication.ruleSha256, MANUAL_ADJUDICATION_RULE_SHA256);
+  assert.deepEqual(
+    result.manualAdjudication.reviewArtifactSha256,
+    FROZEN_REVIEW_ARTIFACT_SHA256,
+  );
   assert.deepEqual(result.metrics, {
     correctAnswers: 4,
     evidencedAnswers: 0,

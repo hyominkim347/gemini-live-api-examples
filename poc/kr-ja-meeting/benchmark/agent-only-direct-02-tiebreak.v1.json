@@ -1,0 +1,17 @@
+{
+  "artifactVersion": 1,
+  "reviewId": "direct-02-tiebreak",
+  "coordinatorSession": "01a04dff-c649-7eb2-b3d4-8c994ec4c6f7",
+  "reviewerCanonicalTask": "/root/remove_developer_lane",
+  "reviewerKind": "codex-agent-task",
+  "recordedAt": "2026-08-30T03:22:45Z",
+  "inputDigests": {
+    "benchmarkSha256": "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6",
+    "rawResultsSha256": "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0"
+  },
+  "questionId": "direct-02",
+  "correct": false,
+  "ambiguity": true,
+  "rationale": "The foreign-speech listening plan impact is present, but translation-only and original-check are not unambiguously entailed.",
+  "rubric": "correctness is meaning equivalence, not exact terminology, but every material expected behavior must be unambiguously present; evidence validity excluded"
+}

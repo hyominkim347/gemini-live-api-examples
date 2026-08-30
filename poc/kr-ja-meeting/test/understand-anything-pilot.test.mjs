@@ -294,6 +294,16 @@ test("operator docs provide package-cwd commands for every budgeted phase and ad
   assert.match(operatorDocs, /새(?:로운)? artifact root[\s\S]*prepare/i);
   assert.match(operatorDocs, /agent-only-gate-v4-frozen-manual/);
   assert.match(operatorDocs, /agent-only-frozen-adjudication\.v1\.json/);
+  assert.match(operatorDocs, /agent-only-manual-review-a\.v1\.json/);
+  assert.match(operatorDocs, /agent-only-manual-review-b\.v1\.json/);
+  assert.match(operatorDocs, /agent-only-direct-02-tiebreak\.v1\.json/);
+  assert.match(operatorDocs, /01a04dff-c649-7eb2-b3d4-8c994ec4c6f7/);
+  assert.match(operatorDocs, /\/root\/upstream_exploration/);
+  assert.match(operatorDocs, /\/root\/remove_developer_lane\/final_security_review/);
+  assert.match(operatorDocs, /recordedAt[\s\S]*원래 review가 수행된\s+시각을 증명하지 않는다/);
+  assert.match(operatorDocs, /Codex agent task[\s\S]*human review가 아니다/);
+  assert.doesNotMatch(operatorDocs, /reviewedAt/);
+  assert.doesNotMatch(operatorDocs, /human reviewer/);
   assert.match(operatorDocs, /correct answer: 4\/12/);
   assert.match(operatorDocs, /direct-02[\s\S]*tiebreak/);
   assert.match(operatorDocs, /향후 raw[\s\S]*새 benchmark\/adjudication revision[\s\S]*fail-closed/);

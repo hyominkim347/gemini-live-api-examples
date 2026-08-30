@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "revision": "frozen-agent-manual-adjudication-v1",
+  "revision": "frozen-agent-manual-adjudication-v2-provenance",
   "benchmarkSha256": "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6",
   "rawResultsSha256": "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0",
-  "ruleRevision": "frozen-manual-adjudication-v1",
+  "ruleRevision": "frozen-manual-adjudication-v2-provenance",
   "questionOrder": [
     "direct-01",
     "direct-02",
@@ -19,11 +19,37 @@
     "negative-02"
   ],
   "reviewMethod": {
-    "policy": "two-independent-strict-consensus-with-question-tiebreak-v1",
+    "policy": "two-independent-agent-task-reviews-with-question-tiebreak-v2",
+    "coordinatorSession": "01a04dff-c649-7eb2-b3d4-8c994ec4c6f7",
     "independentReviewRoles": [
       "independent-review-1",
       "independent-review-2"
     ],
+    "provenanceArtifacts": {
+      "independentReviews": [
+        {
+          "role": "independent-review-1",
+          "reviewId": "manual-review-a",
+          "reviewerCanonicalTask": "/root/upstream_exploration",
+          "artifactPath": "benchmark/agent-only-manual-review-a.v1.json",
+          "sha256": "770ece29a780a1ec72e0bd5e000ca659917c7c8a9ca260fa17f8056c3827918b"
+        },
+        {
+          "role": "independent-review-2",
+          "reviewId": "manual-review-b",
+          "reviewerCanonicalTask": "/root/remove_developer_lane/final_security_review",
+          "artifactPath": "benchmark/agent-only-manual-review-b.v1.json",
+          "sha256": "307c134a238455aabcac29c65f8a34e073e0a016cce01e3ee804b954c8760c57"
+        }
+      ],
+      "tiebreak": {
+        "role": "direct-02-tiebreak",
+        "reviewId": "direct-02-tiebreak",
+        "reviewerCanonicalTask": "/root/remove_developer_lane",
+        "artifactPath": "benchmark/agent-only-direct-02-tiebreak.v1.json",
+        "sha256": "7785b81e5a97f33d6543bee2020af8570bff5f6ea771ebced970106e8b92e0e5"
+      }
+    },
     "tiebreak": {
       "role": "direct-02-tiebreak",
       "questionId": "direct-02",

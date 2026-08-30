@@ -58,9 +58,9 @@ review의 strict consensus와 `direct-02` 불일치에 대한 별도 tiebreak를
 - graph answer time median: 36,840.065ms
 - `rg` answer time median: 33,217.775ms
 - median time reduction: -10.9% (graph arm이 더 느림)
-- manual adjudication table SHA-256: `135fe995bd491f8e5ff5cf9184c2153037bb59f8a7a05d5699f6cd7c7cdda786`
-- manual rule SHA-256: `e205046c9a78211f03bce1ff298916ff131c5e492d1e6ed1298c1bd3bfabf9ab`
-- adjudication SHA-256: `e28b0c63e52ec06bfd17ce94b0b59423eeabfd3cb3df0849464e2af7255b1e4e`
+- manual adjudication table SHA-256: `db4de619d182cc29596de7425cca8b7a4f4d9200a7527adf67c3ca6be06f9f14`
+- manual rule SHA-256: `1b84496f7cf7d88221415a7099fc164dff29ea2d66c231aca690d8d7ea530a01`
+- adjudication SHA-256: `d8814efe662a6e8645c8923c12cbce0cfa73d87f7bf453d604ebe153f74a3c3a`
 
 ## 운영 정책
 
@@ -163,8 +163,28 @@ node scripts/understand-anything-pilot.mjs verify-artifact \
 결정했고 `ambiguity: true`로 남긴다. 판정표는 frozen adjudication contract이며 raw answer,
 evidence, timing을 복제하는 Pilot Artifact가 아니다.
 
+판정 근거는 coordinator session `01a04dff-c649-7eb2-b3d4-8c994ec4c6f7`에서 반환된
+Codex agent task 기록 세 개를 canonical JSON으로 보존한다. 각 파일은 같은 benchmark/raw
+digest, 실제 반환된 `recordedAt`, canonical task, 전체 verdict와 rationale를 고정하며,
+판정표와 코드가 파일 SHA-256까지 검증한다.
+
+- review A: `benchmark/agent-only-manual-review-a.v1.json`, task
+  `/root/upstream_exploration`, SHA-256
+  `770ece29a780a1ec72e0bd5e000ca659917c7c8a9ca260fa17f8056c3827918b`
+- review B: `benchmark/agent-only-manual-review-b.v1.json`, task
+  `/root/remove_developer_lane/final_security_review`, SHA-256
+  `307c134a238455aabcac29c65f8a34e073e0a016cce01e3ee804b954c8760c57`
+- `direct-02` tiebreak: `benchmark/agent-only-direct-02-tiebreak.v1.json`, task
+  `/root/remove_developer_lane`, SHA-256
+  `7785b81e5a97f33d6543bee2020af8570bff5f6ea771ebced970106e8b92e0e5`
+
+여기서 `recordedAt`은 coordinator가 반환 payload를 기록한 시각일 뿐, 원래 review가 수행된
+시각을 증명하지 않는다. 이 파일들은 Codex agent task의 반환 기록이며 human review가 아니다.
+따라서 digest와 session/task/input/content의 결합은 재현할 수 있지만, 사람의 신원이나 외부
+attestation을 증명하지 않는다.
+
 scorer revision은 `agent-only-gate-v4-frozen-manual`, manual rule revision은
-`frozen-manual-adjudication-v1`, output contract는 v3다. 코드가 판정표 SHA와 question
+`frozen-manual-adjudication-v2-provenance`, output contract는 v4다. 코드가 판정표 SHA와 question
 set/order를 직접 고정하므로 호출자가 다른 digest나 판정표를 선택할 수 없다. 임의 prose를
 keyword나 자동 의미 parser로 채점하는 경로도 없다. 향후 raw 또는 benchmark는 기존 판정기로
 재사용하지 않으며, 명시적인 새 benchmark/adjudication revision과 별도 review 없이
