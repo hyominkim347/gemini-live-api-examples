@@ -1,0 +1,241 @@
+{
+  "schemaVersion": 1,
+  "revision": "frozen-agent-manual-adjudication-v2-provenance",
+  "benchmarkSha256": "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6",
+  "rawResultsSha256": "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0",
+  "ruleRevision": "frozen-manual-adjudication-v2-provenance",
+  "questionOrder": [
+    "direct-01",
+    "direct-02",
+    "direct-03",
+    "cross-01",
+    "cross-02",
+    "cross-03",
+    "cross-04",
+    "recovery-01",
+    "recovery-02",
+    "privacy-01",
+    "negative-01",
+    "negative-02"
+  ],
+  "reviewMethod": {
+    "policy": "two-independent-agent-task-reviews-with-question-tiebreak-v2",
+    "coordinatorSession": "01a04dff-c649-7eb2-b3d4-8c994ec4c6f7",
+    "independentReviewRoles": [
+      "independent-review-1",
+      "independent-review-2"
+    ],
+    "provenanceArtifacts": {
+      "independentReviews": [
+        {
+          "role": "independent-review-1",
+          "reviewId": "manual-review-a",
+          "reviewerCanonicalTask": "/root/upstream_exploration",
+          "artifactPath": "benchmark/agent-only-manual-review-a.v1.json",
+          "sha256": "770ece29a780a1ec72e0bd5e000ca659917c7c8a9ca260fa17f8056c3827918b"
+        },
+        {
+          "role": "independent-review-2",
+          "reviewId": "manual-review-b",
+          "reviewerCanonicalTask": "/root/remove_developer_lane/final_security_review",
+          "artifactPath": "benchmark/agent-only-manual-review-b.v1.json",
+          "sha256": "307c134a238455aabcac29c65f8a34e073e0a016cce01e3ee804b954c8760c57"
+        }
+      ],
+      "tiebreak": {
+        "role": "direct-02-tiebreak",
+        "reviewId": "direct-02-tiebreak",
+        "reviewerCanonicalTask": "/root/remove_developer_lane",
+        "artifactPath": "benchmark/agent-only-direct-02-tiebreak.v1.json",
+        "sha256": "7785b81e5a97f33d6543bee2020af8570bff5f6ea771ebced970106e8b92e0e5"
+      }
+    },
+    "tiebreak": {
+      "role": "direct-02-tiebreak",
+      "questionId": "direct-02",
+      "trigger": "independent-review-disagreement"
+    }
+  },
+  "questions": [
+    {
+      "questionId": "direct-01",
+      "rawSequence": 1,
+      "arm": "understandAnythingGraph",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "The answer identifies the changed utterance-end timing and the exact SpeechActivityDetector behavior.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "correct" },
+          { "role": "independent-review-2", "verdict": "correct" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "direct-02",
+      "rawSequence": 4,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "The answer broadly describes mixing plans but does not explicitly establish both translation-only and original-check behavior; the tiebreak judged it insufficient.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "correct" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": { "role": "direct-02-tiebreak", "verdict": "incorrect" }
+      }
+    },
+    {
+      "questionId": "direct-03",
+      "rawSequence": 5,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The answer covers directional translation and resumption components but does not establish the audio-only setup contract.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "cross-01",
+      "rawSequence": 8,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The answer describes the recovery chain but does not establish retained utterance state together with the exact cleanup behavior.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "cross-02",
+      "rawSequence": 9,
+      "arm": "understandAnythingGraph",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "The answer links participant listening-mode restoration to the browser track and gain transition.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "correct" },
+          { "role": "independent-review-2", "verdict": "correct" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "cross-03",
+      "rawSequence": 12,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The answer names the focus and bridge surfaces but omits the required drain, close, then next-subscription order.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "cross-04",
+      "rawSequence": 13,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The frozen graph answer is unknown and provides no behavioral answer.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "recovery-01",
+      "rawSequence": 16,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The frozen graph answer is unknown and provides no behavioral answer.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "recovery-02",
+      "rawSequence": 17,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The frozen graph answer is unknown and provides no behavioral answer.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "privacy-01",
+      "rawSequence": 20,
+      "arm": "understandAnythingGraph",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "The answer discusses telemetry and handle lifecycle broadly but does not establish the exact safe-field allowlist and meeting-end disposal boundary.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "incorrect" },
+          { "role": "independent-review-2", "verdict": "incorrect" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "negative-01",
+      "rawSequence": 21,
+      "arm": "understandAnythingGraph",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "The answer correctly states that the command-line Node example has no runtime or package dependency on kr-ja-meeting.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "correct" },
+          { "role": "independent-review-2", "verdict": "correct" }
+        ],
+        "tiebreak": null
+      }
+    },
+    {
+      "questionId": "negative-02",
+      "rawSequence": 24,
+      "arm": "understandAnythingGraph",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "The answer correctly states that the Python Twilio example is separate from the kr-ja-meeting LiveKit and Gemini socket path.",
+      "reviewProvenance": {
+        "independent": [
+          { "role": "independent-review-1", "verdict": "correct" },
+          { "role": "independent-review-2", "verdict": "correct" }
+        ],
+        "tiebreak": null
+      }
+    }
+  ]
+}

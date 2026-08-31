@@ -1,0 +1,171 @@
+{
+  "revision": "impact-benchmark-v1",
+  "frozenAt": "2026-08-29T17:03:54Z",
+  "freezePolicy": "immutable-after-first-scored-run",
+  "analysisSnapshot": "5bf36dd61b6355368d736479c5ffb528b656d544",
+  "resultContract": {
+    "answer": "string",
+    "unknown": "boolean",
+    "correct": "boolean",
+    "evidence": {
+      "code": "non-empty string[]",
+      "tests": "non-empty string[]"
+    },
+    "inventedFiles": "string[]",
+    "inventedRelations": "string[]",
+    "answerTimeMs": "positive number"
+  },
+  "passGate": {
+    "minimumCorrectAnswers": 10,
+    "requiredEvidencedAnswers": 12,
+    "maximumInventedFiles": 0,
+    "maximumInventedRelations": 0,
+    "minimumMedianTimeReduction": 0.25
+  },
+  "questions": [
+    {
+      "id": "direct-01",
+      "category": "direct-dependency",
+      "prompt": "발화 종료 침묵 임계값을 바꾸면 어떤 자동 발화 동작과 테스트가 직접 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "SpeechActivityDetector의 발화 종료 판정과 자동 utterance boundary가 직접 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/speech-activity-detector.mjs#SpeechActivityDetector"],
+          "tests": ["poc/kr-ja-meeting/test/speech-activity-detector.test.mjs#voice followed by sustained silence emits one automatic utterance boundary"]
+        }
+      }
+    },
+    {
+      "id": "direct-02",
+      "category": "direct-dependency",
+      "prompt": "외국어 원음과 번역음의 gain 규칙을 바꾸면 어떤 청취 계획과 테스트가 직접 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "ListeningMixController가 만드는 foreign-speech 청취 계획과 translation-only 및 original-check 동작이 직접 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/listening-mix-controller.mjs#ListeningMixController"],
+          "tests": ["poc/kr-ja-meeting/test/listening-mix-controller.test.mjs#foreign speech keeps original quieter than the foreground translation"]
+        }
+      }
+    },
+    {
+      "id": "direct-03",
+      "category": "direct-dependency",
+      "prompt": "Gemini setup의 directional translation 또는 session resumption 설정을 바꾸면 어떤 계약과 테스트가 직접 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "buildGeminiSetup의 audio-only directional translation 및 session resumption 계약이 직접 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/gemini-session.mjs#buildGeminiSetup"],
+          "tests": ["poc/kr-ja-meeting/test/gemini-session.test.mjs#Gemini setup enables directional audio translation and session resumption only"]
+        }
+      }
+    },
+    {
+      "id": "cross-01",
+      "category": "cross-layer",
+      "prompt": "자동 발화 중 만료된 Gemini resumption handle을 재시도하는 정책을 바꾸면 브라우저 회의부터 socket까지 어디가 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "BrowserMeetingService의 utterance 유지, GeminiLiveTranslateSocket의 handle 제거 및 단일 재시도, 관련 회의 정리 경로가 함께 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/browser-meeting-service.mjs#BrowserMeetingService", "poc/kr-ja-meeting/src/gemini-live-socket.mjs#GeminiLiveTranslateSocket"],
+          "tests": ["poc/kr-ja-meeting/test/browser-meeting-service.test.mjs#automatic speech keeps its utterance id while an expired Gemini session retries", "poc/kr-ja-meeting/test/gemini-live-socket.test.mjs#an expired resumption handle is cleared and retried exactly once"]
+        }
+      }
+    },
+    {
+      "id": "cross-02",
+      "category": "cross-layer",
+      "prompt": "original-check의 자동 복귀 경계를 바꾸면 회의 상태와 브라우저 오디오 재생의 어떤 관계가 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "MeetingSession의 참가자별 listening mode 복귀와 BrowserAudioPlayout이 적용하는 track 및 gain 계획이 함께 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/meeting-session.mjs#MeetingSession", "poc/kr-ja-meeting/public/browser-audio-playout.mjs#BrowserAudioPlayout"],
+          "tests": ["poc/kr-ja-meeting/test/meeting-session.test.mjs#original-check restores the listener's previous mode at its automatic utterance boundary", "poc/kr-ja-meeting/test/browser-audio-playout.test.mjs#two planned tracks attach as independent audio elements with independent gains"]
+        }
+      }
+    },
+    {
+      "id": "cross-03",
+      "category": "cross-layer",
+      "prompt": "겹침 화자의 통역 focus handoff 조건을 바꾸면 정책과 translation bridge의 어떤 동작이 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "TranslationFocusPolicy의 후보 hold 판정과 LiveTranslationBridge의 drain, close, 다음 구독 순서가 함께 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/translation-focus-policy.mjs#TranslationFocusPolicy", "poc/kr-ja-meeting/src/live-translation-bridge.mjs#LiveTranslationBridge"],
+          "tests": ["poc/kr-ja-meeting/test/translation-focus-policy.test.mjs#an overlap candidate must outlast the minimum hold before receiving vacated focus", "poc/kr-ja-meeting/test/live-translation-bridge.test.mjs#handoff drains and closes the focused bridge before subscribing the next speaker"]
+        }
+      }
+    },
+    {
+      "id": "cross-04",
+      "category": "cross-layer",
+      "prompt": "브라우저 audio element의 play 실패 기록을 바꾸면 클라이언트 재생과 회의 timeline의 어떤 증거가 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "BrowserAudioPlayout의 privacy-safe playout-failure 이벤트와 MeetingEventRecorder가 만드는 상관된 meeting timeline이 함께 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/public/browser-audio-playout.mjs#BrowserAudioPlayout", "poc/kr-ja-meeting/src/meeting-event-recorder.mjs#MeetingEventRecorder"],
+          "tests": ["poc/kr-ja-meeting/test/browser-audio-playout.test.mjs#browser play rejection reports a privacy-safe playout failure instead of a start", "poc/kr-ja-meeting/test/meeting-timeline.test.mjs#browser playout failure reaches the privacy-safe meeting timeline"]
+        }
+      }
+    },
+    {
+      "id": "recovery-01",
+      "category": "recovery-or-privacy",
+      "prompt": "만료된 resumption handle 재시도의 횟수 또는 handle 폐기 시점을 바꾸면 어떤 복구 보장이 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "만료 handle을 지운 뒤 정확히 한 번만 재연결하고, 닫힌 socket 이벤트가 새 연결을 오염시키지 않는 보장이 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/gemini-live-socket.mjs#GeminiLiveTranslateSocket"],
+          "tests": ["poc/kr-ja-meeting/test/gemini-live-socket.test.mjs#an expired resumption handle is cleared and retried exactly once", "poc/kr-ja-meeting/test/gemini-live-socket.test.mjs#events from a closed socket cannot contaminate an immediate reconnect"]
+        }
+      }
+    },
+    {
+      "id": "recovery-02",
+      "category": "recovery-or-privacy",
+      "prompt": "Gemini setup 실패 뒤 translation bridge 정리를 바꾸면 어떤 orphan 또는 ghost 상태 위험이 생기는가?",
+      "expectedAnswer": {
+        "summary": "pending start를 기다린 뒤 Gemini와 구독을 닫고, orphan bridge와 ghost participant 또는 열린 microphone을 남기지 않는 복구 경로가 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/live-translation-bridge.mjs#LiveTranslationBridge", "poc/kr-ja-meeting/src/browser-meeting-service.mjs#BrowserMeetingService"],
+          "tests": ["poc/kr-ja-meeting/test/live-translation-bridge.test.mjs#abort waits for an in-progress start and prevents an orphan bridge", "poc/kr-ja-meeting/test/browser-meeting-service.test.mjs#bridge cleanup failures cannot leave a ghost participant or open microphone"]
+        }
+      }
+    },
+    {
+      "id": "privacy-01",
+      "category": "recovery-or-privacy",
+      "prompt": "회의 lifecycle telemetry의 허용 필드나 resumption handle 저장 위치를 바꾸면 어떤 개인정보 경계가 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "MeetingEventRecorder의 safe-field allowlist와 MemoryResumptionHandleStore의 메모리 전용 보관 및 회의 종료 폐기 경계가 영향을 받는다.",
+        "evidence": {
+          "code": ["poc/kr-ja-meeting/src/meeting-event-recorder.mjs#MeetingEventRecorder", "poc/kr-ja-meeting/src/gemini-session.mjs#MemoryResumptionHandleStore"],
+          "tests": ["poc/kr-ja-meeting/test/meeting-event-recorder.test.mjs#record emits only the privacy-safe allowlist with an injected timestamp", "poc/kr-ja-meeting/test/gemini-session.test.mjs#resumption handles exist only in memory and are cleared with the meeting"]
+        }
+      }
+    },
+    {
+      "id": "negative-01",
+      "category": "negative-control",
+      "prompt": "command-line Node 예제의 microphone type declaration만 바꾸면 한국어-일본어 meeting session 또는 브라우저 playout이 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "영향 없음. command-line Node 예제와 kr-ja-meeting 패키지 사이에 runtime 또는 package dependency가 없다.",
+        "evidence": {
+          "code": ["command-line/node/mic.d.ts", "poc/kr-ja-meeting/package.json"],
+          "tests": ["poc/kr-ja-meeting/test/meeting-session.test.mjs#dynamic roster keeps microphone and speech as separate state"]
+        }
+      }
+    },
+    {
+      "id": "negative-02",
+      "category": "negative-control",
+      "prompt": "Python SDK 예제의 Twilio handler만 바꾸면 kr-ja-meeting의 LiveKit subscription 또는 Gemini socket이 영향을 받는가?",
+      "expectedAnswer": {
+        "summary": "영향 없음. Python Twilio 예제는 kr-ja-meeting의 LiveKit 및 Gemini socket 경로와 별도 실행 단위다.",
+        "evidence": {
+          "code": ["gemini-live-genai-python-sdk/twilio_handler.py", "poc/kr-ja-meeting/package.json"],
+          "tests": ["poc/kr-ja-meeting/test/livekit-subscriptions.test.mjs#LiveKit subscribes to every track in a listening plan", "poc/kr-ja-meeting/test/gemini-live-socket.test.mjs#Gemini socket traces setup, PCM audio, translated output, and resumption"]
+        }
+      }
+    }
+  ]
+}

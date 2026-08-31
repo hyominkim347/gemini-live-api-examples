@@ -1,0 +1,86 @@
+{
+  "artifactVersion": 1,
+  "reviewId": "manual-review-a",
+  "coordinatorSession": "01a04dff-c649-7eb2-b3d4-8c994ec4c6f7",
+  "reviewerCanonicalTask": "/root/upstream_exploration",
+  "reviewerKind": "codex-agent-task",
+  "recordedAt": "2026-08-30T03:21:48Z",
+  "inputDigests": {
+    "benchmarkSha256": "753c08d32feec639a4a8a161423d89c6a6c5389689e77cb4b0dde6d2f25fd4f6",
+    "rawResultsSha256": "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0"
+  },
+  "questions": [
+    {
+      "questionId": "direct-01",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "SpeechActivityDetector의 침묵 판정 시점과 자동 발화 종료 경계가 달라진다고 답해 기대 의미를 충족한다."
+    },
+    {
+      "questionId": "direct-02",
+      "correct": true,
+      "ambiguity": true,
+      "rationale": "ListeningMixController의 원음·번역 트랙 gain 계획과 듣기 모드별 동작을 짚었다. translation-only와 original-check를 직접 열거하지 않아 표현상 여지는 있다."
+    },
+    {
+      "questionId": "direct-03",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "방향성 번역과 재개 동작은 언급했지만 buildGeminiSetup의 audio-only 및 session resumption 설정 계약을 하나의 직접 영향으로 정확히 답하지 않았다."
+    },
+    {
+      "questionId": "cross-01",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "단일 재시도는 언급했지만 자동 발화의 동일 utterance 유지와 관련 회의 정리 경로라는 핵심 보장을 답하지 않았다."
+    },
+    {
+      "questionId": "cross-02",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "개인별 듣기 모드 복귀 시점과 브라우저의 원음·번역 track 및 gain 전환 관계를 정확히 설명했다."
+    },
+    {
+      "questionId": "cross-03",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "일반적인 focus 전환과 bridge 수명주기만 설명했고 후보 hold 판정 및 drain, close, 다음 구독 순서를 답하지 않았다."
+    },
+    {
+      "questionId": "cross-04",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "unknown으로 답해 playout-failure 이벤트와 상관된 meeting timeline의 영향을 제시하지 않았다."
+    },
+    {
+      "questionId": "recovery-01",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "unknown으로 답해 handle 폐기 후 정확히 한 번 재연결하고 닫힌 socket 이벤트를 격리하는 보장을 제시하지 않았다."
+    },
+    {
+      "questionId": "recovery-02",
+      "correct": false,
+      "ambiguity": false,
+      "rationale": "unknown으로 답해 pending start 대기와 Gemini·구독 정리, orphan·ghost·열린 microphone 방지 경로를 제시하지 않았다."
+    },
+    {
+      "questionId": "privacy-01",
+      "correct": false,
+      "ambiguity": true,
+      "rationale": "safe-field 범위와 메모리 저장·삭제 수명주기는 설명했지만 명시적 allowlist와 회의 종료 시 handle 폐기 경계를 확정하지 않았다."
+    },
+    {
+      "questionId": "negative-01",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "Node CLI 타입 선언과 kr-ja-meeting 사이에 연결 관계가 없어 회의 세션과 브라우저 재생에 영향이 없다고 정확히 답했다."
+    },
+    {
+      "questionId": "negative-02",
+      "correct": true,
+      "ambiguity": false,
+      "rationale": "Python Twilio 실행 단위와 kr-ja-meeting의 LiveKit·Gemini socket 경로가 분리되어 직접 영향이 없다고 정확히 답했다."
+    }
+  ]
+}

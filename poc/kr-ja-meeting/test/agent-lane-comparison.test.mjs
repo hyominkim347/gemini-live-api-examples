@@ -1,0 +1,407 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { resolve } from "node:path";
+import test from "node:test";
+
+import {
+  buildArmPrompt,
+  buildCodexExecArgs,
+  buildCrossedRuns,
+  prepareAgentComparison,
+  validateComparisonPlanControls,
+  validateComparisonPlanSeal,
+  validateCurrentComparisonMaterials,
+  verifyAgentComparison,
+  verifyRawAnswer,
+} from "../scripts/agent-lane-comparison.mjs";
+import { digestMaterialRoot } from "../scripts/pilot-local-safety.mjs";
+
+const SNAPSHOT = "5bf36dd61b6355368d736479c5ffb528b656d544";
+const frozenLegacyRawPath = process.env.UA_AGENT_RAW_RESULTS_PATH ??
+  "/private/tmp/ua-agent-comparison/.ua-pilot/agent-lane-comparison/raw-results.json";
+const frozenLegacyOutput = resolve(frozenLegacyRawPath, "..");
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function fixture() {
+  const root = await mkdtemp(resolve(tmpdir(), "ua-agent-comparison-"));
+  const snapshotRoot = resolve(root, "snapshot");
+  const artifactRoot = resolve(root, ".ua-pilot", "pilot-run");
+  const outputDir = resolve(root, ".ua-pilot", "agent-lane-comparison");
+  const graphDir = resolve(snapshotRoot, ".ua");
+  const codePath = "poc/kr-ja-meeting/src/example.mjs";
+  const testPath = "poc/kr-ja-meeting/test/example.test.mjs";
+  await mkdir(resolve(snapshotRoot, "poc/kr-ja-meeting/src"), { recursive: true });
+  await mkdir(resolve(snapshotRoot, "poc/kr-ja-meeting/test"), { recursive: true });
+  await mkdir(graphDir, { recursive: true });
+  await mkdir(artifactRoot, { recursive: true });
+  await writeFile(resolve(snapshotRoot, codePath), "export function affectedBehavior() { return true; }\n");
+  await writeFile(resolve(snapshotRoot, testPath), "test('affected behavior stays grounded', () => {});\n");
+  await writeFile(resolve(artifactRoot, "pilot-plan.json"), JSON.stringify({
+    analysisSnapshot: SNAPSHOT,
+    provider: "current-codex-provider-only",
+    snapshotCheckout: snapshotRoot,
+    artifacts: { graphDirectory: graphDir },
+  }));
+  await writeFile(resolve(artifactRoot, "corpus-manifest.json"), JSON.stringify({
+    analysisSnapshot: SNAPSHOT,
+    included: [
+      { path: codePath, category: "code" },
+      { path: testPath, category: "test" },
+    ],
+  }));
+  const codeNode = `file:${codePath}`;
+  const testNode = `file:${testPath}`;
+  await writeFile(resolve(graphDir, "knowledge-graph.json"), JSON.stringify({
+    project: { gitCommitHash: SNAPSHOT },
+    nodes: [
+      { id: codeNode, type: "file", filePath: codePath, name: "example.mjs" },
+      { id: `function:${codePath}:affectedBehavior`, type: "function", filePath: codePath, name: "affectedBehavior" },
+      { id: testNode, type: "file", filePath: testPath, name: "example.test.mjs" },
+      { id: `test:${testPath}:affected`, type: "function", filePath: testPath, name: "affected behavior stays grounded" },
+    ],
+    edges: [{ source: codeNode, type: "tested_by", target: testNode }],
+    layers: [],
+    tour: [],
+  }));
+  return {
+    root,
+    snapshotRoot,
+    artifactRoot,
+    outputDir,
+    codePath,
+    testPath,
+    codeNode,
+    testNode,
+  };
+}
+
+test("the frozen twelve questions use the crossed Agent Lane order without scorer data", async () => {
+  const benchmark = JSON.parse(await readFile(
+    new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
+    "utf8",
+  ));
+  const questions = benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
+  const runs = buildCrossedRuns(questions, 123_000);
+
+  assert.equal(questions.length, 12);
+  assert.equal(runs.length, 24);
+  assert.deepEqual(runs.slice(0, 4).map(({ questionId, arm }) => [questionId, arm]), [
+    ["direct-01", "understandAnythingGraph"],
+    ["direct-01", "repositorySearchRg"],
+    ["direct-02", "repositorySearchRg"],
+    ["direct-02", "understandAnythingGraph"],
+  ]);
+  assert.ok(runs.every((run) => run.timeoutMs === 123_000));
+  assert.doesNotMatch(JSON.stringify({ questions, runs }), /expectedAnswer|passGate|minimumCorrect|scorer/);
+});
+
+test("the exact frozen legacy comparison verifies read-only without a modern seal", {
+  skip: !existsSync(frozenLegacyRawPath),
+}, async () => {
+  const before = await readFile(frozenLegacyRawPath, "utf8");
+  const verified = await verifyAgentComparison({ outputDir: frozenLegacyOutput });
+
+  assert.equal(verified.provenanceMode, "frozen-digest-provenance-v1");
+  assert.equal(verified.completedRuns, 24);
+  assert.equal(
+    verified.rawResultsSha256,
+    "6f26882d2c0aec1099df082575e95e092be48fbbb17a3041e2ecd3947f7006e0",
+  );
+  assert.equal(await readFile(frozenLegacyRawPath, "utf8"), before);
+});
+
+test("a seal-less arbitrary legacy directory is rejected instead of entering compatibility mode", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "ua-arbitrary-legacy-"));
+  const outputDir = resolve(root, ".ua-pilot", "agent-lane-comparison");
+  try {
+    await mkdir(outputDir, { recursive: true });
+    await writeFile(resolve(outputDir, "raw-results.json"), "{}\n", "utf8");
+    await assert.rejects(
+      verifyAgentComparison({ outputDir }),
+      /frozen|digest mismatch/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prepared comparison controls reject a changed run path and plan bytes", async () => {
+  const benchmarkText = await readFile(
+    new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
+    "utf8",
+  );
+  const benchmark = JSON.parse(benchmarkText);
+  const questions = benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
+  const plan = {
+    contractVersion: 1,
+    scored: false,
+    lane: "agent",
+    provider: "current-codex-provider-only",
+    analysisSnapshot: SNAPSHOT,
+    benchmarkRevision: benchmark.revision,
+    benchmarkFrozenAt: benchmark.frozenAt,
+    benchmarkSha256: sha256(benchmarkText),
+    preparedAt: "2026-08-30T00:00:00.000Z",
+    timeoutMs: 600_000,
+    orderPolicy: "odd-graph-first-even-rg-first",
+    pilotArtifact: {
+      planSha256: "a".repeat(64),
+      manifestSha256: "b".repeat(64),
+      corpusDigestSha256: "c".repeat(64),
+      graphSha256: "d".repeat(64),
+    },
+    materialDigests: {
+      understandAnythingGraph: "e".repeat(64),
+      repositorySearchRg: "f".repeat(64),
+    },
+    materialPolicy: {
+      understandAnythingGraph: "sanitized-knowledge-graph-only",
+      repositorySearchRg: "analysis-corpus-only-rg-discovery",
+      benchmarkAnswersIncluded: false,
+      evaluatorIncluded: false,
+      previousAnswersIncluded: false,
+    },
+    questions,
+    runs: buildCrossedRuns(questions, 600_000),
+  };
+  validateComparisonPlanControls({ plan, benchmark, benchmarkText });
+  const unsafe = structuredClone(plan);
+  unsafe.runs[0].runId = "../escaped";
+  assert.throws(
+    () => validateComparisonPlanControls({ plan: unsafe, benchmark, benchmarkText }),
+    /invalid/,
+  );
+
+  const planText = `${JSON.stringify(plan, null, 2)}\n`;
+  const schemaText = "{}\n";
+  const trustedAnchorSha256 = sha256("frozen comparison inputs");
+  const sealText = JSON.stringify({
+    contractVersion: 1,
+    planSha256: sha256(planText),
+    schemaSha256: sha256(schemaText),
+    trustedAnchorSha256,
+  });
+  validateComparisonPlanSeal({ planText, sealText, schemaText, trustedAnchorSha256 });
+  assert.throws(
+    () => validateComparisonPlanSeal({
+      planText: `${planText} `,
+      sealText,
+      schemaText,
+      trustedAnchorSha256,
+    }),
+    /changed after prepare/,
+  );
+});
+
+test("SELF_CONSISTENT_TAMPER_ACCEPTED is rejected by the frozen comparison anchor", async () => {
+  const benchmarkText = await readFile(
+    new URL("../benchmark/impact-benchmark.v1.json", import.meta.url),
+    "utf8",
+  );
+  const benchmark = JSON.parse(benchmarkText);
+  const questions = benchmark.questions.map(({ id, category, prompt }) => ({ id, category, prompt }));
+  const trustedAnchorSha256 = sha256("trusted frozen pilot and material bytes");
+  const tamperedPlan = {
+    contractVersion: 1,
+    scored: false,
+    lane: "agent",
+    provider: "current-codex-provider-only",
+    analysisSnapshot: SNAPSHOT,
+    benchmarkRevision: benchmark.revision,
+    benchmarkFrozenAt: benchmark.frozenAt,
+    benchmarkSha256: sha256(benchmarkText),
+    preparedAt: "2026-08-30T00:00:00.000Z",
+    timeoutMs: 600_000,
+    orderPolicy: "odd-graph-first-even-rg-first",
+    pilotArtifact: {
+      planSha256: "a".repeat(64),
+      manifestSha256: "b".repeat(64),
+      corpusDigestSha256: "c".repeat(64),
+      graphSha256: "d".repeat(64),
+    },
+    materialDigests: {
+      understandAnythingGraph: sha256("graph plus injected answer key"),
+      repositorySearchRg: "f".repeat(64),
+    },
+    materialPolicy: {
+      understandAnythingGraph: "sanitized-knowledge-graph-only",
+      repositorySearchRg: "analysis-corpus-only-rg-discovery",
+      benchmarkAnswersIncluded: true,
+      evaluatorIncluded: false,
+      previousAnswersIncluded: false,
+    },
+    questions,
+    runs: buildCrossedRuns(questions, 600_000),
+  };
+  const planText = `${JSON.stringify(tamperedPlan, null, 2)}\n`;
+  const schemaText = "{}\n";
+  const attackerAnchor = sha256("attacker-controlled material bytes");
+  const sealText = JSON.stringify({
+    contractVersion: 1,
+    planSha256: sha256(planText),
+    schemaSha256: sha256(schemaText),
+    trustedAnchorSha256: attackerAnchor,
+  });
+
+  assert.throws(
+    () => validateComparisonPlanSeal({
+      planText,
+      sealText,
+      schemaText,
+      trustedAnchorSha256,
+    }),
+    /trusted|anchor|changed after prepare/i,
+  );
+  assert.throws(
+    () => validateComparisonPlanControls({ plan: tamperedPlan, benchmark, benchmarkText }),
+    /answer|material|invalid/i,
+  );
+});
+
+test("answer-key injection is rejected even when the mutable plan digest is updated", async () => {
+  const root = await mkdtemp(resolve(homedir(), ".ua-pilot", "ua-material-anchor-"));
+  const graph = resolve(root, "graph");
+  const rg = resolve(root, "rg");
+  try {
+    await mkdir(graph);
+    await mkdir(rg);
+    await writeFile(resolve(graph, "knowledge-graph.json"), "{}\n", "utf8");
+    await writeFile(resolve(rg, "app.mjs"), "export const app = true;\n", "utf8");
+    const anchoredMaterialDigests = {
+      understandAnythingGraph: await digestMaterialRoot(graph),
+      repositorySearchRg: await digestMaterialRoot(rg),
+    };
+    await writeFile(resolve(graph, "answer-key.json"), "{\"expectedAnswer\":true}\n", "utf8");
+    const selfConsistentMutablePlan = {
+      materialRoots: {
+        root,
+        understandAnythingGraph: graph,
+        repositorySearchRg: rg,
+      },
+      materialDigests: {
+        understandAnythingGraph: await digestMaterialRoot(graph),
+        repositorySearchRg: await digestMaterialRoot(rg),
+      },
+    };
+
+    await assert.rejects(
+      validateCurrentComparisonMaterials(
+        selfConsistentMutablePlan,
+        anchoredMaterialDigests,
+      ),
+      /injected|changed/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("each arm prompt contains only its question and material contract", () => {
+  const graphPrompt = buildArmPrompt({
+    question: { id: "q-01", prompt: "What changes?" },
+    arm: "understandAnythingGraph",
+  });
+  const rgPrompt = buildArmPrompt({
+    question: { id: "q-01", prompt: "What changes?" },
+    arm: "repositorySearchRg",
+  });
+  assert.match(graphPrompt, /knowledge-graph\.json/);
+  assert.doesNotMatch(graphPrompt, /repository search|expectedAnswer|score|previous answer/i);
+  assert.match(rgPrompt, /\brg\b/);
+  assert.doesNotMatch(rgPrompt, /knowledge-graph|expectedAnswer|score|previous answer/i);
+});
+
+test("fresh invocations use the current Codex material-only profile and no resume", () => {
+  const args = buildCodexExecArgs({
+    materialRoot: "/tmp/material",
+    schemaPath: "/tmp/schema.json",
+    answerPath: "/tmp/answer.json",
+  });
+  assert.equal(args.includes("--sandbox"), false);
+  assert.ok(args.some((value) => value.includes("default_permissions=\"ua_pilot_material_only\"")));
+  assert.ok(args.some((value) => value.includes('"/tmp/material"="read"')));
+  assert.ok(args.some((value) => value.includes("network={enabled=false}")));
+  assert.equal(args.includes("resume"), false);
+  assert.equal(args.includes("--oss"), false);
+  assert.equal(args.includes("--local-provider"), false);
+});
+
+test("prepare rejects a self-asserted Pilot Artifact without current verification evidence", async () => {
+  const paths = await fixture();
+  await assert.rejects(
+    prepareAgentComparison({
+      pilotArtifactRoot: paths.artifactRoot,
+      outputDir: paths.outputDir,
+    }),
+    /prepare evidence|artifact verification|inventory verification|complete pinned|missing/i,
+  );
+});
+
+test("verification records grounded code, tests, relations, and measured time without a score", async () => {
+  const paths = await fixture();
+  const raw = await verifyRawAnswer({
+    pilotArtifactRoot: paths.artifactRoot,
+    run: { runId: "01-graph", sequence: 1, questionId: "q-01", arm: "understandAnythingGraph" },
+    question: { id: "q-01", prompt: "Question 1: what changes?" },
+    answerTimeMs: 2_345,
+    answer: {
+      answer: "affectedBehavior and its regression test change together.",
+      unknown: false,
+      evidence: {
+        code: [{ path: paths.codePath, symbol: "affectedBehavior" }],
+        tests: [{ path: paths.testPath, test: "affected behavior stays grounded" }],
+        relations: [{ source: paths.codeNode, type: "tested_by", target: paths.testNode }],
+      },
+    },
+  });
+  assert.equal(raw.answerTimeMs, 2_345);
+  assert.deepEqual(raw.inventedFiles, []);
+  assert.deepEqual(raw.inventedRelations, []);
+  assert.deepEqual(raw.unverifiedEvidence, []);
+  assert.equal(raw.validationStatus, "grounded");
+  assert.equal(Object.hasOwn(raw, "correct"), false);
+  assert.equal(Object.hasOwn(raw, "pass"), false);
+});
+
+test("verification records invented evidence and preserves an evidence-free unknown", async () => {
+  const paths = await fixture();
+  const invented = await verifyRawAnswer({
+    pilotArtifactRoot: paths.artifactRoot,
+    run: { runId: "01-graph", sequence: 1, questionId: "q-01", arm: "understandAnythingGraph" },
+    question: { id: "q-01", prompt: "Question 1: what changes?" },
+    answerTimeMs: 100,
+    answer: {
+      answer: "invented",
+      unknown: false,
+      evidence: {
+        code: [{ path: "invented.mjs", symbol: "nope" }],
+        tests: [],
+        relations: [{ source: paths.codeNode, type: "calls", target: paths.testNode }],
+      },
+    },
+  });
+  assert.deepEqual(invented.inventedFiles, ["invented.mjs"]);
+  assert.equal(invented.inventedRelations.length, 1);
+  assert.equal(invented.validationStatus, "unsupported");
+
+  const unknown = await verifyRawAnswer({
+    pilotArtifactRoot: paths.artifactRoot,
+    run: { runId: "01-rg", sequence: 2, questionId: "q-01", arm: "repositorySearchRg" },
+    question: { id: "q-01", prompt: "Question 1: what changes?" },
+    answerTimeMs: 101,
+    answer: {
+      answer: "unknown",
+      unknown: true,
+      evidence: { code: [], tests: [], relations: [] },
+    },
+  });
+  assert.equal(unknown.validationStatus, "unknown");
+  assert.deepEqual(unknown.inventedFiles, []);
+  assert.deepEqual(unknown.inventedRelations, []);
+});
